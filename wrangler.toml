@@ -1,0 +1,17 @@
+name = "erebusbot"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+LANGUAGE = "zh_CN"
+
+# Secrets（通过 Cloudflare Dashboard 或 wrangler secret put 设置）
+# BOT_TOKEN       - 从 @BotFather 获取的 Bot Token
+# ADMIN_USER_ID   - 管理员 Telegram 用户 ID（支持多管理员，逗号分隔）
+# SILICONFLOW_API_KEY - SiliconFlow API 密钥（用于AI广告检测）
+
+# D1 数据库配置
+[[d1_databases]]
+binding = "BOT_D1"
+database_name = "cf-pm-bot"
+database_id = "e91a400b-f65a-4643-90e4-02fb3558551b"
