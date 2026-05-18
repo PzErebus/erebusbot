@@ -4,11 +4,13 @@ import type { Env, TelegramUpdate, TelegramMessage, TelegramCallbackQuery, Teleg
 import { OptimizedDatabase, createOptimizedDb } from './db-optimized';
 import { MemoryCache } from './cache';
 import { createLogger } from './logger';
-import { AdFilter } from './ad-filter';
+
 
 const log = createLogger('bot');
 
 const globalCache = new MemoryCache(60);
+const updateDeduplication = new Set<number>();
+const MAX_DEDUP_SIZE = 10000;
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -53,16 +55,12 @@ function mk(...rows: Array<Array<{ text: string; callback_data?: string }>>): st
 
 const ADMIN_KB = {
   reply: (userId: number) => mk(
-    [{ text: '✏️ 回复', callback_data: `reply_${userId}` }, { text: '🚫 封禁', callback_data: `ban_${userId}` }]
+    [{ text: '🚫 封禁', callback_data: `ban_${userId}` }]
   )
 };
 
 export function createBot(env: Env) {
   const db = createDb(env);
-  const adFilter = new AdFilter(globalCache);
-  if (env.SILICONFLOW_API_KEY) {
-    adFilter.setApiKey(env.SILICONFLOW_API_KEY);
-  }
   const ADMIN_IDS = new Set<number>(
     (env.ADMIN_USER_ID || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
   );
@@ -106,10 +104,12 @@ export function createBot(env: Env) {
     priority: 'normal' | 'urgent' | 'low';
   }
   const pendingMessagesCache = new MemoryCache();
+  const pendingMessageIds: number[] = [];
   let pendingMessageIdCounter = 1;
 
   function addPendingMessage(msg: PendingMessage): void {
     pendingMessagesCache.set(`pm:${msg.id}`, msg, 86400);
+    pendingMessageIds.push(msg.id);
   }
 
   function getPendingMessage(id: number): PendingMessage | undefined {
@@ -119,23 +119,28 @@ export function createBot(env: Env) {
   function deletePendingMessage(id: number): boolean {
     const key = `pm:${id}`;
     const exists = pendingMessagesCache.has(key);
-    if (exists) pendingMessagesCache.delete(key);
+    if (exists) {
+      pendingMessagesCache.delete(key);
+      const idx = pendingMessageIds.indexOf(id);
+      if (idx !== -1) pendingMessageIds.splice(idx, 1);
+    }
     return exists;
   }
 
   function getAllPendingMessages(): PendingMessage[] {
     const messages: PendingMessage[] = [];
     const now = Date.now();
-    for (const [key, entry] of (pendingMessagesCache as unknown as { cache: Map<string, { value: unknown; expiresAt: number }> }).cache) {
-      if (!key.startsWith('pm:')) continue;
-      if (now > entry.expiresAt) continue;
-      messages.push(entry.value as PendingMessage);
+    for (const id of pendingMessageIds) {
+      const msg = pendingMessagesCache.get<PendingMessage>(`pm:${id}`);
+      if (msg && now <= msg.created_at + 86400 * 1000) {
+        messages.push(msg);
+      }
     }
     return messages;
   }
 
   function getPendingMessageCount(): number {
-    return getAllPendingMessages().length;
+    return pendingMessageIds.length;
   }
 
   const messageStats = {
@@ -260,14 +265,10 @@ export function createBot(env: Env) {
     }
 
     if (text && text !== '/start' && text !== '/help') {
-      const [blacklistResult, adResult, autoReply, isWorkHours] = await Promise.all([
+      const [blacklistResult, autoReply, isWorkHours] = await Promise.all([
         db.checkBlacklist(text).catch(e => {
           log.error('Error checking blacklist', { error: e });
           return { matched: false };
-        }),
-        adFilter.check(text, user.id).catch(e => {
-          log.error('Error checking ad filter', { error: e });
-          return { isAd: false, score: 0, reasons: [], action: 'allow' as const };
         }),
         db.checkAutoReply(text).catch(e => {
           log.error('Error checking auto reply', { error: e });
@@ -282,35 +283,6 @@ export function createBot(env: Env) {
       if (blacklistResult.matched) {
         await sendMsg(chatId, '⚠️ 您的消息包含敏感内容，无法发送。');
         return;
-      }
-
-      if (adResult.isAd) {
-        log.warn('Ad detected', { userId: user.id, score: adResult.score, reasons: adResult.reasons.join(','), action: adResult.action });
-
-        if (adResult.action === 'shadow_block') {
-          await Promise.all([
-            sendMsg(chatId, '✅ 消息已发送'),
-            db.addAuditLog(adminId, 'ad_shadow_block', 'user', String(user.id), `评分:${adResult.score} 原因:${adResult.reasons.join(',')}`).catch(() => {})
-          ]);
-          return;
-        }
-
-        if (adResult.action === 'warn') {
-          const userStats = adFilter.getUserStats(user.id);
-          await Promise.all([
-            sendMsg(chatId, `⚠️ 您的消息疑似广告（评分: ${adResult.score}），请勿发送广告内容。\n剩余警告次数: ${Math.max(0, 3 - userStats.warnings)}`),
-            db.addAuditLog(adminId, 'ad_warn', 'user', String(user.id), `评分:${adResult.score} 原因:${adResult.reasons.join(',')}`).catch(() => {})
-          ]);
-          return;
-        }
-
-        if (adResult.action === 'block') {
-          await Promise.all([
-            sendMsg(chatId, '🚫 您因多次发送广告已被限制发送消息。'),
-            db.addAuditLog(adminId, 'ad_block', 'user', String(user.id), `评分:${adResult.score} 原因:${adResult.reasons.join(',')}`).catch(() => {})
-          ]);
-          return;
-        }
       }
 
       if (!isWorkHours) {
@@ -694,35 +666,86 @@ export function createBot(env: Env) {
     const userId = mapping.user_id;
     const content = msg.text || msg.caption || '[无文本内容]';
     const { type: replyType } = getContent(msg);
-    const sentMsg = await sendMsg(userId, `💬 <b>管理员回复</b>\n\n${escapeHtml(content)}`);
-      if (sentMsg) {
-        for (const m of getAllPendingMessages()) {
-          if (m.user_id === userId) deletePendingMessage(m.id);
-        }
-        const userName = await db.getPmUser(userId);
-        const name = userName?.first_name || userName?.username || `用户${userId}`;
-        await Promise.all([
-          db.markMessagesAsRead(userId).catch(() => {}),
-          db.saveMessage(userId, 'out', replyType, content, undefined, undefined, sentMsg.message_id).catch(() => {}),
-          db.addAuditLog(adminId, 'reply', 'user', String(userId), content.substring(0, 200)).catch(() => {}),
-        ]);
-        await sendMsg(adminId, `✅ 已回复 ${escapeHtml(name)} (ID: <code>${userId}</code>)`);
-        try {
-          await api('editMessageReplyMarkup', {
-            chat_id: userId,
-            message_id: sentMsg.message_id,
-            reply_markup: JSON.stringify({
-              inline_keyboard: [[
-                { text: '👍', callback_data: `rate_${sentMsg.message_id}_1` },
-                { text: '👎', callback_data: `rate_${sentMsg.message_id}_-1` }
-              ]]
-            })
-          });
-        } catch { }
-      } else {
-        await sendMsg(adminId, '❌ 发送失败');
-      }
+
+    const replyMarkup = JSON.stringify({
+      inline_keyboard: [[
+        { text: '👍', callback_data: `rate_${msg.message_id}_1` },
+        { text: '👎', callback_data: `rate_${msg.message_id}_-1` }
+      ]]
+    });
+
+    let sentMsg: TelegramMessage | null = null;
+    const caption = `💬 <b>管理员回复</b>${content !== '[无文本内容]' ? '\n\n' + escapeHtml(content) : ''}`;
+
+    if (replyType === 'photo' && msg.photo) {
+      const photo = msg.photo[msg.photo.length - 1];
+      sentMsg = await api<TelegramMessage>('sendPhoto', {
+        chat_id: userId,
+        photo: photo.file_id,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } else if (replyType === 'video' && msg.video) {
+      sentMsg = await api<TelegramMessage>('sendVideo', {
+        chat_id: userId,
+        video: msg.video.file_id,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } else if (replyType === 'voice' && msg.voice) {
+      sentMsg = await api<TelegramMessage>('sendVoice', {
+        chat_id: userId,
+        voice: msg.voice.file_id,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } else if (replyType === 'audio' && msg.audio) {
+      sentMsg = await api<TelegramMessage>('sendAudio', {
+        chat_id: userId,
+        audio: msg.audio.file_id,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } else if (replyType === 'document' && msg.document) {
+      sentMsg = await api<TelegramMessage>('sendDocument', {
+        chat_id: userId,
+        document: msg.document.file_id,
+        caption: caption,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+    } else if (replyType === 'sticker') {
+      sentMsg = await sendMsg(userId, caption, { reply_markup: replyMarkup });
+    } else {
+      sentMsg = await sendMsg(userId, caption, { reply_markup: replyMarkup });
     }
+
+    if (sentMsg) {
+      for (const m of getAllPendingMessages()) {
+        if (m.user_id === userId) deletePendingMessage(m.id);
+      }
+      const userName = await db.getPmUser(userId);
+      const name = userName?.first_name || userName?.username || `用户${userId}`;
+      const fileId = replyType === 'photo' ? msg.photo?.[msg.photo.length - 1]?.file_id
+        : replyType === 'video' ? msg.video?.file_id
+        : replyType === 'voice' ? msg.voice?.file_id
+        : replyType === 'audio' ? msg.audio?.file_id
+        : replyType === 'document' ? msg.document?.file_id
+        : undefined;
+      await Promise.all([
+        db.markMessagesAsRead(userId).catch(() => {}),
+        db.saveMessage(userId, 'out', replyType, content, fileId, undefined, sentMsg.message_id).catch(() => {}),
+        db.addAuditLog(adminId, 'reply', 'user', String(userId), content.substring(0, 200)).catch(() => {}),
+      ]);
+      await sendMsg(adminId, `✅ 已回复 ${escapeHtml(name)} (ID: <code>${userId}</code>)`);
+    } else {
+      await sendMsg(adminId, '❌ 发送失败');
+    }
+  }
 
   // ============ UI Display Functions ============
 
@@ -1100,26 +1123,17 @@ export function createBot(env: Env) {
   async function showMessageFilter(chatId: number, messageId?: number): Promise<void> {
     try {
       const keywords = await db.getBlacklistKeywords();
-      const config = adFilter.getConfig();
-      const adStatus = config.enabled ? '✅' : '⏸️';
-      const aiStatus = config.aiEnabled ? '✅' : '⏸️';
       const kwActive = keywords.filter(k => k.is_enabled).length;
 
       const text = `<b>╔══ 消息过滤 ══╗</b>\n\n` +
         `┌─ 关键词过滤 ─┐\n` +
         `│ 🔒 规则 ${keywords.length} 条 (启用 ${kwActive})\n` +
         `│ 按关键词/正则匹配拦截消息\n` +
-        `└───────────┘\n\n` +
-        `┌─ AI广告拦截 ─┐\n` +
-        `│ ${adStatus} ${config.enabled ? '已启用' : '已禁用'}\n` +
-        `│ 🤖 AI增强: ${aiStatus} ${config.aiEnabled ? '已启用' : '已禁用'}\n` +
-        `│ 📊 规则阈值: ${config.threshold} | AI阈值: ${config.aiThreshold}\n` +
-        `│ 🔴 严格: ${config.strictThreshold} 分\n` +
         `└───────────┘`;
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
-          [{ text: '🔒 关键词规则', callback_data: 'blacklist' }, { text: '🛡️ AI拦截设置', callback_data: 'ad_filter' }],
+          [{ text: '🔒 关键词规则', callback_data: 'blacklist' }],
           [{ text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
@@ -1368,56 +1382,6 @@ export function createBot(env: Env) {
     }
   }
 
-  async function showAdFilterPanel(chatId: number, messageId?: number): Promise<void> {
-    try {
-      const config = adFilter.getConfig();
-      const statusIcon = config.enabled ? '✅ 已启用' : '❌ 已禁用';
-      const aiIcon = config.aiEnabled ? '✅ 已启用' : '⏸️ 已禁用';
-      const autoBlockIcon = config.autoBlock ? '✅ 开启' : '❌ 关闭';
-      const warnIcon = config.warnFirst ? '✅ 开启' : '❌ 关闭';
-
-      const text = `<b>╔══ 广告拦截 ══╗</b>\n\n` +
-        `┌─ 检测状态 ─┐\n` +
-        `│ ${statusIcon}\n` +
-        `│ 📊 拦截阈值: ${config.threshold} 分\n` +
-        `│ 🔴 严格阈值: ${config.strictThreshold} 分\n` +
-        `│ 🔒 自动封禁: ${autoBlockIcon}\n` +
-        `│ ⚠️ 先警告: ${warnIcon}\n` +
-        `│ 📛 最大警告: ${config.maxWarnings} 次\n` +
-        `└───────────┘\n\n` +
-        `┌─ AI增强检测 ─┐\n` +
-        `│ 🤖 ${aiIcon}\n` +
-        `│ 🎯 AI阈值: ${config.aiThreshold} 分\n` +
-        `│ 🧠 Qwen2.5-7B 免费模型\n` +
-        `│ 规则未命中时AI二次检测\n` +
-        `└───────────┘\n\n` +
-        `┌─ 频率限制 ─┐\n` +
-        `│ ⏱️ ${config.frequencyLimit} 条 / ${config.frequencyWindow} 秒\n` +
-        `└───────────┘\n\n` +
-        `┌─ 检测维度 ─┐\n` +
-        `│ 📝 促销用语 (20+规则)\n` +
-        `│ 🔗 URL/短链接检测\n` +
-        `│ 📱 联系方式检测\n` +
-        `│ 📊 结构特征分析\n` +
-        `│ ⏱️ 发送频率检测\n` +
-        `│ 🤖 AI语义理解\n` +
-        `└───────────┘\n\n` +
-        `<i>评分范围 0-100，超过阈值自动拦截</i>`;
-
-      await editOrSend(chatId, text, {
-        reply_markup: mk(
-          [{ text: config.enabled ? '⏸️ 禁用拦截' : '✅ 启用拦截', callback_data: 'ad_toggle' }],
-          [{ text: config.aiEnabled ? '⏸️ 禁用AI' : '✅ 启用AI', callback_data: 'ad_ai_toggle' }, { text: '🎯 AI阈值', callback_data: 'ad_ai_threshold' }],
-          [{ text: '📈 阈值', callback_data: 'ad_threshold' }, { text: '🔒 封禁', callback_data: 'ad_autoblock' }],
-          [{ text: '⚠️ 警告', callback_data: 'ad_warn_config' }, { text: '⏱️ 频率', callback_data: 'ad_freq_config' }],
-          [{ text: '◀ 消息过滤', callback_data: 'msg_filter' }, { text: '🏠 主页', callback_data: 'admin_back' }]
-        )
-      }, messageId);
-    } catch (e) {
-      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
-    }
-  }
-
   async function showBackupPanel(chatId: number, messageId?: number): Promise<void> {
     try {
       const stats = await db.getPmStats();
@@ -1457,48 +1421,11 @@ export function createBot(env: Env) {
     ['auto_replies', async (ctx) => { await showAutoReplies(ctx.chatId, 0, ctx.msgId); }],
     ['blacklist', async (ctx) => { await showBlacklistKeywords(ctx.chatId, 0, ctx.msgId); }],
     ['work_hours', async (ctx) => { await showWorkHoursSettings(ctx.chatId, ctx.msgId); }],
-    ['ad_filter', async (ctx) => { await showAdFilterPanel(ctx.chatId, ctx.msgId); }],
-    ['ad_toggle', async (ctx) => {
-      const config = adFilter.getConfig();
-      adFilter.updateConfig({ enabled: !config.enabled });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_ai_toggle', async (ctx) => {
-      const config = adFilter.getConfig();
-      adFilter.updateConfig({ aiEnabled: !config.aiEnabled });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_ai_threshold', async (ctx) => {
-      const config = adFilter.getConfig();
-      const newAiThreshold = config.aiThreshold === 60 ? 40 : config.aiThreshold === 40 ? 80 : 60;
-      adFilter.updateConfig({ aiThreshold: newAiThreshold });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_autoblock', async (ctx) => {
-      const config = adFilter.getConfig();
-      adFilter.updateConfig({ autoBlock: !config.autoBlock });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_threshold', async (ctx) => {
-      const config = adFilter.getConfig();
-      const newThreshold = config.threshold === 50 ? 30 : config.threshold === 30 ? 70 : 50;
-      const newStrict = newThreshold + 30;
-      adFilter.updateConfig({ threshold: newThreshold, strictThreshold: Math.min(newStrict, 100) });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_warn_config', async (ctx) => {
-      const config = adFilter.getConfig();
-      adFilter.updateConfig({ warnFirst: !config.warnFirst });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
-    ['ad_freq_config', async (ctx) => {
-      const config = adFilter.getConfig();
-      const newLimit = config.frequencyLimit === 5 ? 3 : config.frequencyLimit === 3 ? 10 : 5;
-      adFilter.updateConfig({ frequencyLimit: newLimit });
-      await showAdFilterPanel(ctx.chatId, ctx.msgId);
-    }],
     ['help', async (ctx) => {
       const helpText = '<b>╔══ 使用帮助 ══╗</b>\n\n' +
+        '┌─ 当前版本 ─┐\n' +
+        '📦 v202605182039\n' +
+        '└───────────┘\n\n' +
         '┌─ 功能说明 ─┐\n' +
         '📌 👥 用户管理 - 查看/管理所有用户\n' +
         '📌 📨 待处理 - 查看待处理消息\n' +
@@ -1509,7 +1436,6 @@ export function createBot(env: Env) {
         '📌 🔒 黑名单 - 过滤垃圾/广告消息\n' +
         '📌 🕐 工作时间 - 非工作时间自动回复\n' +
         '📌 🚫 封禁列表 - 封禁/解封用户操作\n' +
-        '📌 🛡️ 广告拦截 - 智能识别广告消息\n' +
         '📌 ⚡ 快捷回复 - 预设常用回复模板\n' +
         '📌 ⏰ 定时消息 - 定时发送消息\n' +
         '📌 📝 审计日志 - 操作记录追踪\n' +
@@ -1867,6 +1793,11 @@ export function createBot(env: Env) {
 
   // ============ Main Update Handler ============
   async function handleUpdate(update: TelegramUpdate): Promise<void> {
+    if (!update.update_id) return;
+    if (updateDeduplication.size >= MAX_DEDUP_SIZE) updateDeduplication.clear();
+    if (updateDeduplication.has(update.update_id)) return;
+    updateDeduplication.add(update.update_id);
+
     if (!update.message && !update.callback_query) return;
 
     try {

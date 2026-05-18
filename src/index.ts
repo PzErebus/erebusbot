@@ -11,7 +11,7 @@ import { createLogger } from './logger';
 
 const log = createLogger('api');
 
-const VERSION = '1.0.0';
+const VERSION = '202605182039';
 const apiCache = new MemoryCache(60);
 
 export default {
