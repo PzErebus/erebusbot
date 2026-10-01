@@ -20,7 +20,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.2026051801",
+    "@cloudflare/workers-types": "^4.20260518.1",
     "@types/node": "^20.10.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.5",
