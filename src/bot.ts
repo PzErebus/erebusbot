@@ -1827,7 +1827,10 @@ export function createBot(env: Env) {
 
     if (!isAdmin(userId)) return;
 
-    try { await answerCb(query.id); } catch { }
+    // answerCallbackQuery 只负责消掉客户端的转圈动画，与面板渲染互不依赖。
+    // 之前先 await 它再干活，每次点击白等一个 Telegram 往返（~300ms）；
+    // 改成并发触发，点击到面板刷新的耗时直接少这一截。
+    fire(answerCb(query.id).catch(() => { }));
 
     const ctx: CbContext = { chatId, userId, msgId, data };
 
