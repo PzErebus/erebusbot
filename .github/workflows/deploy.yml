@@ -1,0 +1,44 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-erebusbot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 类型检查 + 测试 + 部署到 Cloudflare Workers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Unit & integration tests
+        run: npm test
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: deploy
+        env:
+          # 部署前先写入版本号（wrangler 部署的是 src/index.ts 源码，无需 tsc 产物）
+          GIT_COMMIT: ${{ github.sha }}

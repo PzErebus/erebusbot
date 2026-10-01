@@ -202,6 +202,34 @@ npm run build
 npm run deploy
 ```
 
+注释掉 `npm run deploy` 里的 `version:bump` 即可跳过版本号改动，直接 `npx wrangler deploy`。
+
+---
+
+## 自动部署（GitHub Actions）
+
+`.github/workflows/deploy.yml` —— push 到 `main` 时自动跑「类型检查 → 测试 → 部署」；也可在 GitHub 仓库手动触发（workflow_dispatch）。
+
+需要在仓库 **Settings → Secrets and variables → Actions → Secrets** 中添加一个密钥：
+
+| Secret 名 | 取值 |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建的 Token，需勾选 `Account → Cloudflare Workers:Edit` 与 `Account → D1:Edit` |
+
+生成后可直接本地跑一次，把 token 交给命令行：
+
+```bash
+export CLOUDFLARE_API_TOKEN=xxxxxxxxxxxx
+npx wrangler whoami   # 确认已识别账号
+npx wrangler deploy   # 部署 Worker + D1 绑定
+```
+
+注意事项：
+
+- GitHub Actions 里**不会**执行 `version:bump`，避免 `package.json` 改动回写仓库造成下次合并冲突
+- Worker 名取自 `wrangler.toml` 的 `name = "erebusbot"`，首次部署会直接创建该 Worker
+- D1 的 `database_id` 已固化在 `wrangler.toml`，换机器/换环境不需要重新 `wrangler d1 create`
+
 ---
 
 ## 技术栈
