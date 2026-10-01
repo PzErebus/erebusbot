@@ -210,12 +210,61 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             gap: 20px;
             margin-bottom: 25px;
         }
+        .login-mask {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 23, 42, 0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+        }
+        .login-mask.show { display: flex; }
+        .login-box {
+            background: white;
+            border-radius: 14px;
+            padding: 32px 30px;
+            width: 340px;
+            max-width: 90vw;
+            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+        }
+        .login-box h2 { font-size: 19px; margin-bottom: 6px; color: #333; }
+        .login-box .login-sub { font-size: 13px; color: #888; margin-bottom: 18px; }
+        .login-box input {
+            width: 100%;
+            padding: 11px 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+        .login-box input:focus { outline: none; border-color: #667eea; }
+        .login-box .btn { width: 100%; }
+        .login-error { color: #d93025; font-size: 13px; min-height: 20px; margin-top: 6px; }
+        .header-auth {
+            margin-top: 10px;
+            font-size: 13px;
+            opacity: 0.9;
+            cursor: pointer;
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>🤖 ErebusBot 管理后台</h1>
         <p>实时查看 Bot 运行状态和用户数据</p>
+        <div class="header-auth" onclick="showLogin()">🔐 管理员登录 / 切换身份</div>
+    </div>
+
+    <div class="login-mask" id="loginMask">
+        <div class="login-box">
+            <h2>🔐 管理员登录</h2>
+            <div class="login-sub">输入 ADMIN_API_KEY 换取访问令牌（有效期 12 小时）</div>
+            <input type="password" id="apiKeyInput" placeholder="ADMIN_API_KEY" autocomplete="current-password">
+            <button class="btn btn-primary" onclick="doLogin()">登录</button>
+            <div class="login-error" id="loginError"></div>
+        </div>
     </div>
 
     <div class="nav">
@@ -360,6 +409,101 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         let currentUserPage = 1;
         const itemsPerPage = 20;
 
+        // ===== 鉴权：管理后台会话令牌（用 ADMIN_API_KEY 换 JWT） =====
+        const TOKEN_KEY = 'erebusbot_admin_token';
+        let authToken = sessionStorage.getItem(TOKEN_KEY) || '';
+
+        function setAuthToken(token) {
+            authToken = token || '';
+            if (authToken) {
+                sessionStorage.setItem(TOKEN_KEY, authToken);
+            } else {
+                sessionStorage.removeItem(TOKEN_KEY);
+            }
+        }
+
+        // 统一接口请求：自动携带 Bearer 令牌，遇到 401/403 自动弹登录框
+        async function apiFetch(url, options) {
+            const opts = options || {};
+            const headers = Object.assign({}, opts.headers);
+            if (authToken) {
+                headers['Authorization'] = 'Bearer ' + authToken;
+            }
+            if (opts.body && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+            const response = await fetch(url, Object.assign({}, opts, { headers: headers }));
+            if (response.status === 401 || response.status === 403) {
+                setAuthToken('');
+                showLogin();
+            }
+            return response;
+        }
+
+        function showLogin(message) {
+            const mask = document.getElementById('loginMask');
+            const errEl = document.getElementById('loginError');
+            if (errEl && message) errEl.textContent = message;
+            if (mask) mask.classList.add('show');
+        }
+
+        function hideLogin() {
+            const mask = document.getElementById('loginMask');
+            if (mask) mask.classList.remove('show');
+        }
+
+        // 用 ADMIN_API_KEY 换取 JWT
+        function doLogin() {
+            const keyInput = document.getElementById('apiKeyInput');
+            const errEl = document.getElementById('loginError');
+            const key = keyInput ? keyInput.value.trim() : '';
+            errEl.textContent = '';
+            if (!key) {
+                errEl.textContent = '请输入 ADMIN_API_KEY';
+                return;
+            }
+
+            fetch('/admin/api/auth/login', {
+                method: 'POST',
+                headers: { 'X-API-Key': key, 'Content-Type': 'application/json' }
+            })
+            .then(function(res) {
+                return res.json().then(function(data) {
+                    return { ok: res.ok, data: data };
+                });
+            })
+            .then(function(result) {
+                if (result.ok && result.data && result.data.token) {
+                    setAuthToken(result.data.token);
+                    if (keyInput) keyInput.value = '';
+                    hideLogin();
+                    refreshAll();
+                } else {
+                    errEl.textContent = (result.data && result.data.error) || '登录失败';
+                }
+            })
+            .catch(function(err) {
+                errEl.textContent = '网络错误: ' + err.message;
+            });
+        }
+
+        // 重新拉取所有数据（登录成功后调用）
+        function refreshAll() {
+            loadStats();
+            loadUsers();
+            loadMessageStats();
+        }
+
+        // 回车登录
+        document.addEventListener('DOMContentLoaded', function() {
+            const keyInput = document.getElementById('apiKeyInput');
+            if (keyInput) {
+                keyInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') doLogin();
+                });
+            }
+        });
+
         // DOMContentLoaded事件
         document.addEventListener('DOMContentLoaded', function() {
             loadStats();
@@ -380,7 +524,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             let lastUnreadCount = 0;
             setInterval(async () => {
                 try {
-                    const response = await fetch('/admin/api/messages');
+                    const response = await apiFetch('/admin/api/messages');
                     if (response.ok) {
                         const data = await response.json();
                         const newUnread = data.stats?.unread || 0;
@@ -442,7 +586,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         // 加载统计数据
         async function loadStats() {
             try {
-                const response = await fetch('/admin/api/stats');
+                const response = await apiFetch('/admin/api/stats');
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
@@ -470,7 +614,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         // 加载用户列表
         async function loadUsers() {
             try {
-                const response = await fetch('/admin/api/users');
+                const response = await apiFetch('/admin/api/users');
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
@@ -683,7 +827,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         // 加载消息统计（不显示具体消息内容，保护隐私）
         async function loadMessageStats() {
             try {
-                const response = await fetch('/admin/api/stats');
+                const response = await apiFetch('/admin/api/stats');
                 if (!response.ok) {
                     throw new Error('HTTP ' + response.status);
                 }
@@ -798,7 +942,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             container.appendChild(loading);
 
             try {
-                const response = await fetch('/admin/api/search?q=' + encodeURIComponent(query));
+                const response = await apiFetch('/admin/api/search?q=' + encodeURIComponent(query));
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const data = await response.json();
 

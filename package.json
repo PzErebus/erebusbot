@@ -1,6 +1,6 @@
 {
   "name": "erebusbot",
-  "version": "202605182039",
+  "version": "202605182048",
   "description": "ErebusBot - Telegram 私聊消息转发 Bot",
   "main": "dist/index.js",
   "scripts": {

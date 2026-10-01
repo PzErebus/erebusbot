@@ -4,14 +4,14 @@ import type { Env, TelegramUpdate } from './types';
 import { createBot } from './bot';
 import { createOptimizedDb } from './db-optimized';
 import { MemoryCache } from './cache';
-import { authenticateAdminRequest, checkRateLimit, createAuthHeaders, createUnauthorizedResponse, createRateLimitResponse } from './auth';
+import { authenticateAdminRequest, checkRateLimit, createAuthHeaders, createUnauthorizedResponse, createRateLimitResponse, issueAdminToken, secureEqual } from './auth';
 import { generateCSPHeaders, generateCORSHeaders, handleCORSOptionsRequest, createSafeResponse, generateSecurityHeaders } from './security';
 import { DASHBOARD_HTML } from './dashboard';
 import { createLogger } from './logger';
 
 const log = createLogger('api');
 
-const VERSION = '202605182039';
+const VERSION = '202605182048';
 const apiCache = new MemoryCache(60);
 
 export default {
@@ -104,20 +104,40 @@ export default {
       }
     }
 
-    // Admin Dashboard - Web UI（需要认证）
+    // Admin Dashboard - Web UI
+    // 页面本身是静态资源（不含任何凭据/数据），未认证时也下发，
+    // 由前端展示登录浮层；所有数据接口仍强制鉴权。
     if (path === '/admin' || path === '/admin/') {
       const auth = await authenticateAdminRequest(request, env);
-      if (!auth.success) {
-        return createUnauthorizedResponse(auth.error);
+
+      // 页面访问限速（防止未认证状态下被高频抓取）
+      const pageLimit = await checkRateLimit(`page:${clientIP}`, 'admin_dashboard', env, 100, 60);
+      if (!pageLimit.allowed) {
+        return createRateLimitResponse(pageLimit.resetTime - Math.floor(Date.now() / 1000));
       }
-      
+
+      if (!auth.success) {
+        return serveAdminDashboard();
+      }
+
       // 速率限制检查
       const rateLimit = await checkRateLimit(auth.userId || 'admin', 'admin_dashboard', env, 100, 60);
       if (!rateLimit.allowed) {
         return createRateLimitResponse(rateLimit.resetTime - Math.floor(Date.now() / 1000));
       }
-      
+
       return serveAdminDashboard();
+    }
+
+    // 登录端点：用 ADMIN_API_KEY 换一张管理员会话 JWT（免认证，但限速）
+    if (path === '/admin/api/auth/login') {
+      if (request.method !== 'POST') {
+        return new Response('Method Not Allowed', {
+          status: 405,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', ...generateSecurityHeaders() }
+        });
+      }
+      return handleAdminLogin(request, env, clientIP);
     }
 
     // Admin API端点（需要认证）
@@ -239,6 +259,56 @@ async function handleDebugEndpoints(request: Request, env: Env, path: string): P
   }
 
   return null;
+}
+
+// 登录端点：校验 ADMIN_API_KEY，签发管理员会话 JWT
+async function handleAdminLogin(request: Request, env: Env, clientIP: string): Promise<Response> {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...generateSecurityHeaders(),
+    ...generateCORSHeaders(env.CORS_ALLOWED_ORIGIN)
+  };
+
+  if (!env.ADMIN_API_KEY) {
+    return new Response(JSON.stringify({ error: 'Admin authentication not configured' }), {
+      status: 503,
+      headers
+    });
+  }
+
+  // 暴力破解防护：同一 IP 10 分钟内最多 10 次
+  const rateLimit = await checkRateLimit(`login:${clientIP}`, 'admin_login', env, 10, 600);
+  if (!rateLimit.allowed) {
+    return new Response(JSON.stringify({ error: 'Too many login attempts, please retry later' }), {
+      status: 429,
+      headers: { ...headers, ...createAuthHeaders(0, rateLimit.resetTime - Math.floor(Date.now() / 1000)) }
+    });
+  }
+
+  const authHeader = request.headers.get('Authorization');
+  const providedKey = request.headers.get('X-API-Key')
+    || (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : '')
+    || '';
+
+  if (!providedKey || !(await secureEqual(providedKey, env.ADMIN_API_KEY))) {
+    log.warn('Admin login failed: invalid credentials', { ip: clientIP });
+    return new Response(JSON.stringify({ error: 'Invalid credentials' }), {
+      status: 401,
+      headers: { ...headers, ...createAuthHeaders(rateLimit.remaining, 0), 'WWW-Authenticate': 'Bearer' }
+    });
+  }
+
+  try {
+    const token = await issueAdminToken(env, 'system');
+    log.info('Admin login succeeded', { ip: clientIP });
+    return new Response(
+      JSON.stringify({ token, tokenType: 'Bearer', expiresIn: 12 * 3600 }),
+      { status: 200, headers: { ...headers, ...createAuthHeaders(rateLimit.remaining, 0) } }
+    );
+  } catch (error) {
+    log.error('Admin login failed to sign token', { error });
+    return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500, headers });
+  }
 }
 
 // Admin Dashboard HTML（安全的版本，使用DOM操作而非innerHTML）

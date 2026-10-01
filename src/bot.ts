@@ -327,10 +327,21 @@ export function createBot(env: Env) {
         parse_mode: 'HTML',
         reply_markup: replyMarkup
       });
-    } else if (contentType === 'sticker') {
-      sentMsg = await sendMsg(adminId, headerText + '\n🎭 [贴纸表情]', {
+    } else if (contentType === 'sticker' && msg.sticker) {
+      const textMsg = await sendMsg(adminId, headerText);
+      sentMsg = await api<TelegramMessage>('sendSticker', {
+        chat_id: adminId,
+        sticker: msg.sticker.file_id,
         reply_markup: replyMarkup
       });
+      const mappingTasks: Promise<void>[] = [];
+      if (textMsg) {
+        mappingTasks.push(db.savePmMessageMapping(user.id, msg.message_id, textMsg.message_id).catch(() => {}));
+      }
+      if (sentMsg) {
+        mappingTasks.push(db.savePmMessageMapping(user.id, msg.message_id, sentMsg.message_id).catch(() => {}));
+      }
+      await Promise.all(mappingTasks);
     } else if (contentType === 'video' && msg.video) {
       sentMsg = await api<TelegramMessage>('sendVideo', {
         chat_id: adminId,
@@ -385,12 +396,15 @@ export function createBot(env: Env) {
         : contentType === 'audio' ? msg.audio?.file_id
         : contentType === 'document' ? msg.document?.file_id
         : undefined;
-      await Promise.all([
-        db.savePmMessageMapping(user.id, msg.message_id, sentMsg.message_id).catch(() => {}),
+      const tasks: Promise<unknown>[] = [
         db.saveMessage(user.id, 'in', contentType, content, fileId, msg.message_id, sentMsg.message_id).catch(e => {
           log.error('Error saving incoming message', { error: e });
         }),
-      ]);
+      ];
+      if (contentType !== 'sticker') {
+        tasks.push(db.savePmMessageMapping(user.id, msg.message_id, sentMsg.message_id).catch(() => {}));
+      }
+      await Promise.all(tasks);
       await sendMsg(chatId, '✅ 消息已发送给管理员，请耐心等待回复。');
     } else {
       await sendMsg(chatId, '❌ 发送失败，请稍后重试。');
@@ -1424,7 +1438,7 @@ export function createBot(env: Env) {
     ['help', async (ctx) => {
       const helpText = '<b>╔══ 使用帮助 ══╗</b>\n\n' +
         '┌─ 当前版本 ─┐\n' +
-        '📦 v202605182039\n' +
+        '📦 v202605182048\n' +
         '└───────────┘\n\n' +
         '┌─ 功能说明 ─┐\n' +
         '📌 👥 用户管理 - 查看/管理所有用户\n' +
