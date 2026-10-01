@@ -15,7 +15,7 @@ const MAX_DEDUP_SIZE = 10000;
 const POLL_OFFSET_KEY = 'tg_poll_offset';
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202605182048';
+export const BOT_VERSION = '202610012315';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -124,6 +124,27 @@ function pageSlice<T>(items: T[], page: number, size = PAGE_SIZE): { rows: T[]; 
     hasMore: start + size < items.length,
     totalPages: Math.max(1, Math.ceil(items.length / size))
   };
+}
+
+// ============ UI v3 设计语言 ============
+// 统一视觉规范：标题 → 重分隔线 → 「▸ 小节」→ 紧凑信息行 → 斜体提示。
+// 弃用旧版 ╔══╗/┌─┐ 盒子字符（宽度随内容漂移、对不齐）。
+
+const DIV = '━━━━━━━━━━━━━━━━━━';
+
+/** 面板头：加粗标题 + 可选副标题 + 分隔线 */
+function head(title: string, sub?: string): string {
+  return `<b>${title}</b>` + (sub ? `\n<i>${sub}</i>` : '') + `\n${DIV}`;
+}
+
+/** 小节标题行 */
+function sec(name: string): string {
+  return `\n<b>▸ ${name}</b>`;
+}
+
+/** 底部斜体提示行 */
+function tip(s: string): string {
+  return `\n\n<i>💡 ${s}</i>`;
 }
 
 const ADMIN_KB = {
@@ -378,7 +399,7 @@ export function createBot(env: Env) {
     const ok = await guard('promptInput')(db.setUserSession(ctx.userId, action, JSON.stringify(sessionData)));
     if (ok === null) { await showFail(ctx.chatId, ctx.msgId, '操作'); return; }
     await editOrSend(ctx.chatId,
-      `<b>╔══ ${title} ══╗</b>\n\n${body}`, {
+      `${head(title)}\n\n${body}`, {
       reply_markup: mk([{ text: '❌ 取消', callback_data: cancelTo }])
     }, ctx.msgId);
   }
@@ -923,6 +944,7 @@ export function createBot(env: Env) {
 
   // ============ UI Display Functions ============
 
+  /** 主面板：状态总览 + 四大功能中心（消息/用户/自动化/系统）+ 快捷直达 */
   async function showAdminPanel(chatId: number, messageId?: number): Promise<void> {
     try {
       let stats = { totalUsers: 0, totalMessages: 0, todayMessages: 0, blockedUsers: 0 };
@@ -936,31 +958,119 @@ export function createBot(env: Env) {
         log.error('Stats error in admin panel', { error: e });
       }
       const pendingCount = getPendingMessageCount();
-      const allPending = getAllPendingMessages();
-      const urgentCount = allPending.filter(m => m.priority === 'urgent').length;
 
-      const text = `<b>╔══ 管理面板 ══╗</b>\n\n` +
-        `┌─ 系统状态 ─┐\n` +
-        `│ ✅ 运行正常\n` +
-        `│ 👥 用户 ${stats.totalUsers}\n` +
-        `│ 📨 待处理 ${pendingCount} 条${urgentCount > 0 ? ` 🔴${urgentCount}紧急` : ''}\n` +
-        `│ 🔔 未读 ${unreadCount} 条\n` +
-        `└───────────┘\n\n` +
-        `<i>请选择下方功能</i>`;
+      const text = head('🛠 管理中心', 'ErebusBot 私聊中继') +
+        `\n\n👥 用户 <b>${stats.totalUsers}</b> · 📨 待处理 <b>${pendingCount}</b>` +
+        `\n🔔 未读 <b>${unreadCount}</b> · 🚫 封禁 <b>${stats.blockedUsers}</b>` +
+        `\n🟢 系统运行正常 · v${BOT_VERSION}` +
+        tip('点击下方按钮进入各功能中心');
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
-          [{ text: '👥 用户管理', callback_data: 'user_list' }, { text: `📨 待处理${pendingCount > 0 ? ` (${pendingCount})` : ''}`, callback_data: 'pending_messages' }],
-          [{ text: '📊 数据统计', callback_data: 'stats' }, { text: '💬 回复管理', callback_data: 'reply_mgmt' }],
-          [{ text: '🛡️ 消息过滤', callback_data: 'msg_filter' }, { text: '📢 群发消息', callback_data: 'broadcast' }],
-          [{ text: '⚙️ 基础设置', callback_data: 'settings' }, { text: '🕐 工作时间', callback_data: 'work_hours' }],
-          [{ text: '⏰ 定时消息', callback_data: 'scheduled' }, { text: '📝 审计日志', callback_data: 'audit_log' }],
-          [{ text: '💾 数据备份', callback_data: 'backup' }, { text: '📖 使用帮助', callback_data: 'help' }]
+          [{ text: `📨 消息中心${pendingCount > 0 ? ` (${pendingCount})` : ''}`, callback_data: 'hub_msgs' }, { text: '👥 用户中心', callback_data: 'hub_users' }],
+          [{ text: '🤖 自动化', callback_data: 'hub_auto' }, { text: '⚙️ 系统', callback_data: 'hub_sys' }],
+          [{ text: '📊 数据统计', callback_data: 'stats' }, { text: '❓ 帮助', callback_data: 'help' }]
         )
       }, messageId);
     } catch (e) {
       log.error('Fatal error in admin panel', { error: e });
       await editOrSend(chatId, '⚠️ 面板加载失败', undefined, messageId);
+    }
+  }
+
+  // ---- 四大功能中心 ----
+
+  async function showMsgHub(chatId: number, messageId?: number): Promise<void> {
+    try {
+      const unreadCount = await db.getUnreadMessageCount().catch(() => 0);
+      const pendingCount = getPendingMessageCount();
+      const text = head('📨 消息中心') +
+        `\n\n📨 待处理 <b>${pendingCount}</b> 条 · 🔵 未读 <b>${unreadCount}</b> 条` +
+        tip('待处理为最近 24 小时内转发的消息');
+      await editOrSend(chatId, text, {
+        reply_markup: mk(
+          [{ text: `📨 待处理消息 (${pendingCount})`, callback_data: 'pending_messages' }],
+          [{ text: `🔵 未读消息 (${unreadCount})`, callback_data: 'unread_messages' }],
+          [{ text: '📊 数据统计', callback_data: 'stats' }],
+          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+        )
+      }, messageId);
+    } catch (e) {
+      log.error('Error showing msg hub', { error: e });
+      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
+    }
+  }
+
+  async function showUserHub(chatId: number, messageId?: number): Promise<void> {
+    try {
+      const [userCount, blocked] = await Promise.all([
+        db.getPmUserCount().catch(() => 0),
+        db.getBlockedPmUsers().catch(() => [])
+      ]);
+      const text = head('👥 用户中心') +
+        `\n\n👥 共 <b>${userCount}</b> 位用户 · 🚫 封禁 <b>${blocked.length}</b> 位` +
+        tip('支持标签/备注/封禁与对话历史管理');
+      await editOrSend(chatId, text, {
+        reply_markup: mk(
+          [{ text: '👥 用户列表', callback_data: 'user_list' }],
+          [{ text: `🚫 封禁列表 (${blocked.length})`, callback_data: 'ban_list' }],
+          [{ text: '📢 群发消息', callback_data: 'broadcast' }],
+          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+        )
+      }, messageId);
+    } catch (e) {
+      log.error('Error showing user hub', { error: e });
+      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
+    }
+  }
+
+  async function showAutoHub(chatId: number, messageId?: number): Promise<void> {
+    try {
+      const [autoReplies, quickReplies, scheduled, workHours] = await Promise.all([
+        db.getAutoReplies().catch(() => []),
+        db.getQuickReplies().catch(() => []),
+        db.getAllScheduledMessages().catch(() => []),
+        db.getWorkHoursSetting().catch(() => null)
+      ]);
+      const pendingScheduled = scheduled.filter(m => !m.is_sent).length;
+      const workStatus = workHours?.enabled
+        ? `🟢 ${String(workHours.startHour).padStart(2, '0')}:00-${String(workHours.endHour).padStart(2, '0')}:00`
+        : '⚪ 未开启';
+      const text = head('🤖 自动化') +
+        sec('规则状态') +
+        `\n🤖 自动回复 <b>${autoReplies.length}</b> 条 · ⚡ 快捷回复 <b>${quickReplies.length}</b> 条` +
+        `\n⏰ 定时待发 <b>${pendingScheduled}</b> 条 · 🕐 工作时间 ${workStatus}` +
+        tip('匹配关键词自动回复、预设模板与定时发送');
+      await editOrSend(chatId, text, {
+        reply_markup: mk(
+          [{ text: `🤖 自动回复 (${autoReplies.length})`, callback_data: 'auto_replies' }, { text: `⚡ 快捷回复 (${quickReplies.length})`, callback_data: 'quick_replies' }],
+          [{ text: `⏰ 定时消息 (${pendingScheduled})`, callback_data: 'scheduled' }, { text: '🕐 工作时间', callback_data: 'work_hours' }],
+          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+        )
+      }, messageId);
+    } catch (e) {
+      log.error('Error showing auto hub', { error: e });
+      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
+    }
+  }
+
+  async function showSysHub(chatId: number, messageId?: number): Promise<void> {
+    try {
+      const keywords = await db.getBlacklistKeywords().catch(() => []);
+      const kwActive = keywords.filter(k => k.is_enabled).length;
+      const text = head('⚙️ 系统') +
+        `\n\n🔒 过滤规则 <b>${keywords.length}</b> 条（启用 ${kwActive}）` +
+        tip('欢迎语、消息过滤、审计与数据备份');
+      await editOrSend(chatId, text, {
+        reply_markup: mk(
+          [{ text: '⚙️ 基础设置', callback_data: 'settings' }, { text: `🔒 消息过滤 (${keywords.length})`, callback_data: 'msg_filter' }],
+          [{ text: '📝 审计日志', callback_data: 'audit_log' }, { text: '💾 数据备份', callback_data: 'backup' }],
+          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+        )
+      }, messageId);
+    } catch (e) {
+      log.error('Error showing sys hub', { error: e });
+      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
     }
   }
 
@@ -971,45 +1081,35 @@ export function createBot(env: Env) {
       const unreadMessages = await db.getUnreadMessages(20);
       const unreadCount = unreadMessages.length;
 
-      let text = `<b>╔══ 待处理消息 ══╗</b>\n`;
-      text += `📨 待处理 ${pendingCount} 条  🔵 未读 ${unreadCount} 条\n\n`;
+      let text = head('📨 待处理消息',
+        `待处理 ${pendingCount} 条 · 未读 ${unreadCount} 条`);
 
       if (messages.length === 0 && unreadMessages.length === 0) {
-        text += `<i>暂无待处理和未读消息</i>`;
+        text += `\n\n<i>🎉 暂无待处理和未读消息</i>`;
       } else {
         if (unreadMessages.length > 0) {
-          text += `┌─ 🔵 未读消息 ─────┐\n`;
+          text += sec(`未读消息`);
           for (let i = 0; i < Math.min(unreadMessages.length, 5); i++) {
             const msg = unreadMessages[i];
             const name = msg.first_name || msg.username || `User${msg.user_id}`;
-            const time = fmtClock(msg.created_at);
-            const content = msg.content.length > 25 ? msg.content.substring(0, 25) + '...' : msg.content;
-            text += `│ 👤 ${escapeHtml(name)}\n│ 🕐 ${time}  📝 ${escapeHtml(content)}\n`;
+            text += `\n${i + 1}. 👤 ${escapeHtml(name)} · ${fmtClock(msg.created_at)}\n   ${escapeHtml(trunc(msg.content, 30))}`;
           }
           if (unreadMessages.length > 5) {
-            text += `│ ... 还有 ${unreadMessages.length - 5} 条\n`;
+            text += `\n<i>…还有 ${unreadMessages.length - 5} 条</i>`;
           }
-          text += `└─────────────────┘\n\n`;
         }
-
         if (messages.length > 0) {
-          text += `┌─ ⏳ 拦截消息 ─────┐\n`;
+          text += sec(`拦截消息`);
           for (let i = 0; i < messages.length; i++) {
             const msg = messages[i];
             const name = msg.first_name || msg.username || `User${msg.user_id}`;
-            const time = fmtTime(msg.created_at);
-            const content = msg.content.length > 25 ? msg.content.substring(0, 25) + '...' : msg.content;
             const priorityIcon = msg.priority === 'urgent' ? '🔴' : msg.priority === 'low' ? '⚪' : '🟡';
-            text += `│ ${priorityIcon} ${escapeHtml(name)}\n│ 🕐 ${time}\n│ 📝 ${escapeHtml(content)}\n`;
+            text += `\n${i + 1}. ${priorityIcon} ${escapeHtml(name)} · ${fmtTime(msg.created_at)}\n   ${escapeHtml(trunc(msg.content, 30))}`;
           }
-          text += `└─────────────────┘`;
         }
       }
 
-      const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-      if (unreadMessages.length > 0) {
-        keyboard.push([{ text: `🔵 查看全部未读 (${unreadMessages.length})`, callback_data: 'unread_messages' }]);
-      }
+      const keyboard: KbRow[] = [];
       if (messages.length > 0) {
         for (const msg of messages) {
           const name = (msg.first_name || msg.username || `U${msg.user_id}`).substring(0, 8);
@@ -1019,7 +1119,10 @@ export function createBot(env: Env) {
           ]);
         }
       }
-      keyboard.push([{ text: '🏠 主页', callback_data: 'admin_back' }]);
+      if (unreadMessages.length > 0) {
+        keyboard.push([{ text: `🔵 查看全部未读 (${unreadMessages.length})`, callback_data: 'unread_messages' }]);
+      }
+      keyboard.push([{ text: '🔙 消息中心', callback_data: 'hub_msgs' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       log.error('Error showing pending messages', { error: e });
@@ -1032,17 +1135,15 @@ export function createBot(env: Env) {
       const messages = await db.getUnreadMessages(30);
       const unreadCount = messages.length;
 
-      let text = `<b>╔══ 未读消息 ══╗</b>  ${unreadCount} 条\n\n`;
+      let text = head('🔵 未读消息', `共 ${unreadCount} 条`);
 
       if (messages.length === 0) {
-        text += `<i>暂无未读消息</i>`;
+        text += `\n\n<i>🎉 暂无未读消息</i>`;
       } else {
         for (let i = 0; i < messages.length; i++) {
           const msg = messages[i];
           const name = msg.first_name || msg.username || `User${msg.user_id}`;
-          const time = fmtTime(msg.created_at);
-          const content = msg.content.length > 40 ? msg.content.substring(0, 40) + '...' : msg.content;
-          text += `┌─ ${i + 1}. 👤 ${escapeHtml(name)}\n│ 🕐 ${time}\n│ 📝 ${escapeHtml(content)}\n└───────────┘\n`;
+          text += `\n${i + 1}. 👤 ${escapeHtml(name)} · ${fmtTime(msg.created_at)}\n   ${escapeHtml(trunc(msg.content, 40))}`;
         }
       }
 
@@ -1050,18 +1151,21 @@ export function createBot(env: Env) {
       if (messages.length > 0) {
         // 每个用户取其最新一条未读做按钮名（find 拿不到时跳过，不用非空断言）
         const seen = new Set<number>();
+        let row: KbRow = [];
         for (const msg of messages) {
           if (seen.has(msg.user_id)) continue;
           seen.add(msg.user_id);
           if (keyboard.length >= 5) break;
-          keyboard.push([{ text: `👤 ${shortName(msg, msg.user_id)}`, callback_data: `pm_user_${msg.user_id}` }]);
+          row.push({ text: `👤 ${shortName(msg, msg.user_id)}`, callback_data: `pm_user_${msg.user_id}` });
+          if (row.length === 2) { keyboard.push(row); row = []; }
         }
-        if (seen.size > keyboard.length) {
-          keyboard.push([{ text: `... 还有 ${seen.size - keyboard.length} 位用户`, callback_data: 'user_list' }]);
+        if (row.length > 0) keyboard.push(row);
+        if (seen.size > Math.min(keyboard.length * 2, 10)) {
+          keyboard.push([{ text: `... 还有 ${seen.size} 位用户`, callback_data: 'user_list' }]);
         }
       }
       keyboard.push([{ text: '🔵 全部标为已读', callback_data: 'mark_all_read' }]);
-      keyboard.push([{ text: '◀ 返回', callback_data: 'pending_messages' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 消息中心', callback_data: 'hub_msgs' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       log.error('Error showing unread messages', { error: e });
@@ -1075,25 +1179,30 @@ export function createBot(env: Env) {
       const { rows: pageUsers, hasMore, totalPages } = pageSlice(users, page);
       const start = page * PAGE_SIZE;
 
-      let text = `<b>╔══ 用户管理 ══╗</b>  ${page + 1}/${totalPages}\n\n`;
+      let text = head('👥 用户列表', `共 ${users.length} 位 · 第 ${page + 1}/${totalPages} 页`);
+
       if (pageUsers.length === 0) {
-        text += `<i>暂无用户</i>`;
+        text += `\n\n<i>暂无用户</i>`;
       } else {
         for (let i = 0; i < pageUsers.length; i++) {
           const user = pageUsers[i];
-          const lastActive = user.last_message_at ? fmtDate(user.last_message_at) : '无';
-          text += `┌─ ${start + i + 1}. 👤 <b>${escapeHtml(displayName(user, user.user_id))}</b>\n│ 🆔 <code>${user.user_id}</code>\n│ 🕐 ${lastActive}\n└───────────┘\n`;
+          const lastActive = user.last_message_at ? fmtDate(user.last_message_at) : '无记录';
+          text += `\n${start + i + 1}. <b>${escapeHtml(displayName(user, user.user_id))}</b>\n   🆔 <code>${user.user_id}</code> · 活跃 ${lastActive}`;
         }
       }
 
       const keyboard: KbRow[] = [];
+      // 两列排布用户按钮，减少滚动长度
+      let row: KbRow = [];
       for (const user of pageUsers) {
-        keyboard.push([{ text: `👤 ${shortName(user, user.user_id, 12)}`, callback_data: `pm_user_${user.user_id}` }]);
+        row.push({ text: `👤 ${shortName(user, user.user_id, 10)}`, callback_data: `pm_user_${user.user_id}` });
+        if (row.length === 2) { keyboard.push(row); row = []; }
       }
+      if (row.length > 0) keyboard.push(row);
       const nav = navRow('pm_user_list_', page, hasMore);
       if (nav) keyboard.push(nav);
-      keyboard.push([{ text: '🚫 封禁用户', callback_data: 'ban_list' }]);
-      keyboard.push([{ text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🚫 封禁列表', callback_data: 'ban_list' }]);
+      keyboard.push([{ text: '🔙 用户中心', callback_data: 'hub_users' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       log.error('Error showing user list', { error: e });
@@ -1110,32 +1219,25 @@ export function createBot(env: Env) {
         adminId ? db.getUserSession(adminId).catch(() => null) : Promise.resolve(null)
       ]);
       if (!user) {
-        await editOrSend(chatId, `❌ 未找到用户<code>${targetUserId}</code>`, undefined, messageId);
+        await editOrSend(chatId, `❌ 未找到用户 <code>${targetUserId}</code>`, undefined, messageId);
         return;
       }
 
       const name = displayName(user, targetUserId);
       const createdDate = fmtDate(user.created_at);
-      const lastActive = user.last_message_at ? fmtDate(user.last_message_at) : '无';
+      const lastActive = user.last_message_at ? fmtDate(user.last_message_at) : '无记录';
 
       const tags = user.tags || '';
       const notes = user.notes || '';
 
-      const text = `<b>╔══ 用户详情 ══╗</b>\n\n` +
-        `┌─ 基本信息 ─┐\n` +
-        `│ 👤 ${escapeHtml(name)}\n` +
-        `│ 🆔 <code>${user.user_id}</code>\n` +
-        (user.username ? `│ 📎 @${user.username}\n` : '') +
-        `└───────────┘\n\n` +
-        `┌─ 活动数据 ─┐\n` +
-        `│ 📅 注册: ${createdDate}\n` +
-        `│ 🕐 活跃: ${lastActive}\n` +
-        `│ ${isBlocked ? '🚫 已封禁' : '✅ 正常'}\n` +
-        `└───────────┘\n\n` +
-        `┌─ 标签备注 ─┐\n` +
-        `│ 🏷️ ${tags ? escapeHtml(tags) : '<i>无</i>'}\n` +
-        `│ 📝 ${notes ? escapeHtml(trunc(notes, 80)) : '<i>无</i>'}\n` +
-        `└───────────┘`;
+      const text = head('👤 用户详情', isBlocked ? '🚫 已封禁' : '🟢 正常') +
+        `\n\n👤 <b>${escapeHtml(name)}</b>${user.username ? ` (@${user.username})` : ''}` +
+        `\n🆔 <code>${user.user_id}</code>` +
+        sec('活动') +
+        `\n📅 注册 ${createdDate} · 🕐 活跃 ${lastActive}` +
+        sec('标签 / 备注') +
+        `\n🏷️ ${tags ? escapeHtml(tags) : '<i>无</i>'}` +
+        `\n📝 ${notes ? escapeHtml(trunc(notes, 80)) : '<i>无</i>'}`;
 
       const statusText = isBlocked ? '✅ 解封用户' : '🚫 封禁用户';
       const statusAction = isBlocked ? `unban_pm_${targetUserId}` : `ban_pm_${targetUserId}`;
@@ -1161,10 +1263,10 @@ export function createBot(env: Env) {
         keyboard.push([{ text: '✉️ 回复用户', callback_data: `reply_${targetUserId}` }]);
       }
 
-      keyboard.push([{ text: statusText, callback_data: statusAction }]);
       keyboard.push([{ text: '🏷️ 标签', callback_data: `set_tags_${targetUserId}` }, { text: '📝 备注', callback_data: `set_notes_${targetUserId}` }]);
       keyboard.push([{ text: '📜 历史', callback_data: `msg_history_${targetUserId}` }, { text: '✅ 已读', callback_data: `mark_read_${targetUserId}` }]);
-      keyboard.push([{ text: '◀ 返回列表', callback_data: 'user_list' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: statusText, callback_data: statusAction }]);
+      keyboard.push([{ text: '🔙 用户列表', callback_data: 'user_list' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
 
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
@@ -1187,23 +1289,18 @@ export function createBot(env: Env) {
       }
       const avgPerUser = totalUsers > 0 ? Math.round(messageStats.totalMessages / totalUsers * 10) / 10 : 0;
 
-      const text = `<b>╔══ 数据统计 ══╗</b>\n\n` +
-        `┌─ 用户数据 ─┐\n` +
-        `│ 👥 总用户  ${totalUsers}\n` +
-        `│ 🟢 今日活跃  ${messageStats.todayActiveUsers.size}\n` +
-        `│ 📊 人均消息  ${avgPerUser}\n` +
-        `│ 🚫 封禁  ${blockedUsers}\n` +
-        `└───────────┘\n\n` +
-        `┌─ 消息数据 ─┐\n` +
-        `│ 📨 今日  ${messageStats.todayMessages}\n` +
-        `│ 💬 总量  ${messageStats.totalMessages}\n` +
-        `└───────────┘\n\n` +
-        `<i>⚠️ 统计数据为内存缓存，重启后重置</i>`;
+      const text = head('📊 数据统计') +
+        sec('用户') +
+        `\n👥 总数 <b>${totalUsers}</b> · 🟢 今日活跃 <b>${messageStats.todayActiveUsers.size}</b>` +
+        `\n🚫 封禁 <b>${blockedUsers}</b> · 📊 人均消息 <b>${avgPerUser}</b>` +
+        sec('消息') +
+        `\n📨 今日 <b>${messageStats.todayMessages}</b> · 💬 累计 <b>${messageStats.totalMessages}</b>` +
+        tip('统计数据为内存缓存，重启后归零');
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: '✅ 标记全部已读', callback_data: 'mark_all_read' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: '🔙 消息中心', callback_data: 'hub_msgs' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1220,9 +1317,11 @@ export function createBot(env: Env) {
         db.setUserSession(userId, 'pm_broadcast', '{}')
       ]);
       await editOrSend(chatId,
-        `<b>╔══ 群发消息 ══╗</b>\n\n` +
-        `┌─ 发送信息 ─┐\n│ 👥 目标: ${userCount} 人\n│ 📝 支持: HTML / 纯文本\n└───────────┘\n\n<i>请直接输入广播内容</i>`, {
-        reply_markup: mk([{ text: '❌ 取消', callback_data: 'admin_back' }])
+        head('📢 群发消息') +
+        `\n\n👥 目标 <b>${userCount}</b> 位用户` +
+        `\n📝 支持 HTML / 纯文本` +
+        tip('请直接输入广播内容'), {
+        reply_markup: mk([{ text: '❌ 取消', callback_data: 'hub_users' }])
       }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 启动失败', undefined, messageId);
@@ -1234,25 +1333,30 @@ export function createBot(env: Env) {
       let users: Array<{ user_id: number; username: string | null; first_name: string | null }> = [];
       try { users = await db.getBlockedPmUsers(); } catch (e) { log.error('Query error in ban list', { error: e }); }
 
-      let text = `<b>╔══ 封禁列表 ══╗</b>  ${users.length} 人\n\n`;
+      let text = head('🚫 封禁列表', `共 ${users.length} 人`);
+
       if (users.length === 0) {
-        text += `<i>暂无封禁用户</i>`;
+        text += `\n\n<i>🎉 暂无封禁用户</i>`;
       } else {
         for (let i = 0; i < users.length; i++) {
           const user = users[i];
-          text += `┌─ ${i + 1}. 🚫 <b>${escapeHtml(displayName(user, user.user_id))}</b>\n│ 🆔 <code>${user.user_id}</code>\n└───────────┘\n`;
+          text += `\n${i + 1}. 🚫 <b>${escapeHtml(displayName(user, user.user_id))}</b>\n   🆔 <code>${user.user_id}</code>`;
         }
-        if (users.length > 10) text += `<i>…仅显示前 10 人</i>\n`;
+        if (users.length > 10) text += `\n<i>…仅显示前 10 人</i>`;
       }
 
       const keyboard: KbRow[] = [];
-      for (const user of users.slice(0, 5)) {
-        keyboard.push([{ text: `✅ 解封 ${shortName(user, user.user_id, 12)}`, callback_data: `unban_pm_${user.user_id}` }]);
+      // 两列解封按钮
+      let row: KbRow = [];
+      for (const user of users.slice(0, 6)) {
+        row.push({ text: `✅ ${shortName(user, user.user_id, 10)}`, callback_data: `unban_pm_${user.user_id}` });
+        if (row.length === 2) { keyboard.push(row); row = []; }
       }
-      if (users.length > 5) {
-        keyboard.push([{ text: `... 还有 ${users.length - 5} 人可解封`, callback_data: 'noop' }]);
+      if (row.length > 0) keyboard.push(row);
+      if (users.length > 6) {
+        keyboard.push([{ text: `... 还有 ${users.length - 6} 人可解封，请从用户列表操作`, callback_data: 'user_list' }]);
       }
-      keyboard.push([{ text: '◀ 用户管理', callback_data: 'user_list' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 用户中心', callback_data: 'hub_users' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
@@ -1264,18 +1368,18 @@ export function createBot(env: Env) {
       let welcomeMsg = '';
       try { welcomeMsg = await db.getSetting('welcome_message') || ''; } catch { }
 
-      const text = `<b>╔══ 基础设置 ══╗</b>\n\n` +
-        `┌─ 当前配置 ─┐\n` +
-        `│ 💬 欢迎消息:\n` +
-        `${welcomeMsg ? `│ ${escapeHtml(welcomeMsg.substring(0, 50))}${welcomeMsg.length > 50 ? '...' : ''}\n` : '│ ⚠️ <i>未设置（使用默认值）</i>\n'}` +
-        `└───────────┘\n\n` +
-        `┌─ 系统状态 ─┐\n│ 🌐 语言: 中文 (zh_CN)\n│ ✅ 状态: 运行中\n└───────────┘`;
+      const text = head('⚙️ 基础设置') +
+        sec('欢迎语') +
+        (welcomeMsg
+          ? `\n${escapeHtml(welcomeMsg.substring(0, 60))}${welcomeMsg.length > 60 ? '…' : ''}`
+          : `\n⚠️ <i>未设置（使用默认值）</i>`) +
+        sec('系统') +
+        `\n🌐 语言: 中文 · 🟢 状态: 运行中 · 📦 v${BOT_VERSION}`;
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
-          [{ text: '✏️ 修改欢迎语', callback_data: 'pm_set_welcome' }],
-          [{ text: '🔄 重置默认', callback_data: 'pm_reset_welcome' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: '✏️ 修改欢迎语', callback_data: 'pm_set_welcome' }, { text: '🔄 重置默认', callback_data: 'pm_reset_welcome' }],
+          [{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1288,16 +1392,14 @@ export function createBot(env: Env) {
       const keywords = await db.getBlacklistKeywords();
       const kwActive = keywords.filter(k => k.is_enabled).length;
 
-      const text = `<b>╔══ 消息过滤 ══╗</b>\n\n` +
-        `┌─ 关键词过滤 ─┐\n` +
-        `│ 🔒 规则 ${keywords.length} 条 (启用 ${kwActive})\n` +
-        `│ 按关键词/正则匹配拦截消息\n` +
-        `└───────────┘`;
+      const text = head('🛡️ 消息过滤') +
+        `\n\n🔒 过滤规则 <b>${keywords.length}</b> 条（启用 ${kwActive}）` +
+        tip('按关键词或正则匹配，命中即拦截用户消息');
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: '🔒 关键词规则', callback_data: 'blacklist' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1314,20 +1416,16 @@ export function createBot(env: Env) {
       ]);
       const autoActive = autoReplies.filter(r => r.is_enabled).length;
 
-      const text = `<b>╔══ 回复管理 ══╗</b>\n\n` +
-        `┌─ 自动回复 ─┐\n` +
-        `│ 🤖 规则 ${autoReplies.length} 条 (启用 ${autoActive})\n` +
-        `│ 用户消息匹配关键词时自动回复\n` +
-        `└───────────┘\n\n` +
-        `┌─ 快捷回复 ─┐\n` +
-        `│ ⚡ 模板 ${quickReplies.length} 条\n` +
-        `│ 管理员一键发送预设回复\n` +
-        `└───────────┘`;
+      const text = head('💬 回复管理') +
+        sec('自动回复') +
+        `\n🤖 规则 <b>${autoReplies.length}</b> 条（启用 ${autoActive}）\n<i>用户消息命中关键词时自动回复</i>` +
+        sec('快捷回复') +
+        `\n⚡ 模板 <b>${quickReplies.length}</b> 条\n<i>管理员一键发送预设回复</i>`;
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
-          [{ text: '🤖 自动回复', callback_data: 'auto_replies' }, { text: '⚡ 快捷回复', callback_data: 'quick_replies' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: `🤖 自动回复 (${autoReplies.length})`, callback_data: 'auto_replies' }, { text: `⚡ 快捷回复 (${quickReplies.length})`, callback_data: 'quick_replies' }],
+          [{ text: '🔙 自动化', callback_data: 'hub_auto' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1341,26 +1439,29 @@ export function createBot(env: Env) {
       const { rows: pageReplies, hasMore, totalPages } = pageSlice(replies, page);
       const start = page * PAGE_SIZE;
 
-      let text = `<b>╔══ 自动回复 ══╗</b>  ${page + 1}/${totalPages}\n\n`;
+      let text = head('🤖 自动回复', `共 ${replies.length} 条 · 第 ${page + 1}/${totalPages} 页`);
       if (pageReplies.length === 0) {
-        text += `<i>暂无自动回复规则</i>`;
+        text += `\n\n<i>暂无自动回复规则</i>`;
       } else {
         for (let i = 0; i < pageReplies.length; i++) {
           const reply = pageReplies[i];
           const matchTypeText = reply.match_type === 'exact' ? '精确' : reply.match_type === 'regex' ? '正则' : '包含';
-          text += `┌─ ${start + i + 1}. ${reply.is_enabled ? '✅' : '⏸️'} <b>${escapeHtml(reply.keyword)}</b>\n│ 📋 ${matchTypeText}\n│ 💬 ${escapeHtml(trunc(reply.reply_text, 25))}\n└───────────┘\n`;
+          text += `\n${start + i + 1}. ${reply.is_enabled ? '🟢' : '⏸️'} <b>${escapeHtml(reply.keyword)}</b> [${matchTypeText}]\n   💬 ${escapeHtml(trunc(reply.reply_text, 30))}`;
         }
       }
 
       const keyboard: KbRow[] = [];
+      let row: KbRow = [];
       for (const reply of pageReplies) {
         const statusIcon = reply.is_enabled ? '⏸️' : '✅';
-        keyboard.push([{ text: `${statusIcon} ${trunc(reply.keyword, 10)}`, callback_data: `auto_reply_${reply.id}` }]);
+        row.push({ text: `${statusIcon} ${trunc(reply.keyword, 8)}`, callback_data: `auto_reply_${reply.id}` });
+        if (row.length === 2) { keyboard.push(row); row = []; }
       }
+      if (row.length > 0) keyboard.push(row);
       keyboard.push([{ text: '➕ 添加规则', callback_data: 'add_auto_reply' }]);
       const nav = navRow('auto_replies_', page, hasMore);
       if (nav) keyboard.push(nav);
-      keyboard.push([{ text: '◀ 回复管理', callback_data: 'reply_mgmt' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 回复管理', callback_data: 'reply_mgmt' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
@@ -1373,25 +1474,28 @@ export function createBot(env: Env) {
       const { rows: pageKeywords, hasMore, totalPages } = pageSlice(keywords, page);
       const start = page * PAGE_SIZE;
 
-      let text = `<b>╔══ 黑名单关键词 ══╗</b>  ${page + 1}/${totalPages}\n\n`;
+      let text = head('🔒 黑名单关键词', `共 ${keywords.length} 条 · 第 ${page + 1}/${totalPages} 页`);
       if (pageKeywords.length === 0) {
-        text += `<i>暂无黑名单关键词</i>`;
+        text += `\n\n<i>暂无黑名单关键词</i>`;
       } else {
         for (let i = 0; i < pageKeywords.length; i++) {
           const kw = pageKeywords[i];
-          text += `┌─ ${start + i + 1}. ${kw.is_enabled ? '✅' : '⏸️'} <b>${escapeHtml(kw.keyword)}</b>\n│ 📋 ${kw.is_regex ? '正则' : '普通'}${kw.reason ? `\n│ 📝 ${escapeHtml(kw.reason)}` : ''}\n└───────────┘\n`;
+          text += `\n${start + i + 1}. ${kw.is_enabled ? '🟢' : '⏸️'} <b>${escapeHtml(kw.keyword)}</b> [${kw.is_regex ? '正则' : '普通'}]${kw.reason ? `\n   📝 ${escapeHtml(kw.reason)}` : ''}`;
         }
       }
 
       const keyboard: KbRow[] = [];
+      let row: KbRow = [];
       for (const kw of pageKeywords) {
         const statusIcon = kw.is_enabled ? '⏸️' : '✅';
-        keyboard.push([{ text: `${statusIcon} ${trunc(kw.keyword, 8)}`, callback_data: `blacklist_${kw.id}` }]);
+        row.push({ text: `${statusIcon} ${trunc(kw.keyword, 8)}`, callback_data: `blacklist_${kw.id}` });
+        if (row.length === 2) { keyboard.push(row); row = []; }
       }
+      if (row.length > 0) keyboard.push(row);
       keyboard.push([{ text: '➕ 添加关键词', callback_data: 'add_blacklist' }]);
       const nav = navRow('blacklist_page_', page, hasMore);
       if (nav) keyboard.push(nav);
-      keyboard.push([{ text: '◀ 消息过滤', callback_data: 'msg_filter' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 消息过滤', callback_data: 'msg_filter' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
@@ -1401,17 +1505,18 @@ export function createBot(env: Env) {
   async function showWorkHoursSettings(chatId: number, messageId?: number): Promise<void> {
     try {
       const setting = await db.getWorkHoursSetting();
-      let text = `<b>╔══ 工作时间 ══╗</b>\n\n`;
-      if (!setting || !setting.enabled) {
-        text += `┌─ 当前配置 ─┐\n│ ⏸️ 已关闭\n└───────────┘\n\n💡 点击下方按钮开启并设置工作时间`;
-      } else {
-        text += `┌─ 当前配置 ─┐\n│ ✅ 已开启\n│ 🕐 ${String(setting.startHour).padStart(2, '0')}:00 - ${String(setting.endHour).padStart(2, '0')}:00\n└───────────┘\n\n💬 非工作时间回复:\n${escapeHtml(setting.offHoursMessage || '默认提示')}`;
-      }
+      const text = head('🕐 工作时间') +
+        sec('当前配置') +
+        (!setting || !setting.enabled
+          ? `\n⚪ 未开启\n<i>开启后，非工作时间自动回复用户</i>`
+          : `\n🟢 已开启 · ${String(setting.startHour).padStart(2, '0')}:00 - ${String(setting.endHour).padStart(2, '0')}:00` +
+            `\n\n💬 非工作时间回复:\n${escapeHtml(setting.offHoursMessage || '默认提示')}`);
+
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: setting?.enabled ? '🔴 关闭' : '✅ 开启', callback_data: 'toggle_work_hours' }, { text: '🕐 设置时间', callback_data: 'set_work_hours_time' }],
           [{ text: '📝 设置回复语', callback_data: 'set_off_hours_msg' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: '🔙 自动化', callback_data: 'hub_auto' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1429,22 +1534,22 @@ export function createBot(env: Env) {
       ]);
       const name = displayName(user, targetUserId);
 
-      let text = `<b>╔══ 对话历史 ══╗</b>  ${escapeHtml(name)}\n\n`;
+      let text = head('📜 对话历史', name);
       if (messages.length === 0) {
-        text += `<i>暂无消息记录</i>`;
+        text += `\n\n<i>暂无消息记录</i>`;
       } else {
         for (const msg of messages) {
-          const dir = msg.direction === 'in' ? '👤' : '🤖';
+          const dir = msg.direction === 'in' ? '👤 用户' : '🤖 管理员';
           const readIcon = msg.direction === 'in' && !msg.is_read ? ' 🔵' : '';
           const ratingIcon = msg.rating === 1 ? ' 👍' : msg.rating === -1 ? ' 👎' : '';
-          text += `${dir} ${fmtTime(msg.created_at)}${readIcon}${ratingIcon}\n${escapeHtml(trunc(msg.content, 40))}\n──────\n`;
+          text += `\n${dir} · ${fmtTime(msg.created_at)}${readIcon}${ratingIcon}\n   ${escapeHtml(trunc(msg.content, 40))}`;
         }
       }
 
       const keyboard: KbRow[] = [];
       const nav = navRow(`msg_history_${targetUserId}_`, page, messages.length === pageSize);
       if (nav) keyboard.push(nav);
-      keyboard.push([{ text: '◀ 返回用户', callback_data: `pm_user_${targetUserId}` }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 返回用户', callback_data: `pm_user_${targetUserId}` }, { text: '🏠 主页', callback_data: 'admin_back' }]);
 
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
@@ -1456,13 +1561,13 @@ export function createBot(env: Env) {
   async function showQuickReplies(chatId: number, messageId?: number): Promise<void> {
     try {
       const replies = await db.getQuickReplies();
-      let text = `<b>╔══ 快捷回复 ══╗</b>  ${replies.length} 条\n\n`;
+      let text = head('⚡ 快捷回复', `共 ${replies.length} 条`);
       if (replies.length === 0) {
-        text += `<i>暂无快捷回复</i>`;
+        text += `\n\n<i>暂无快捷回复，点击下方「添加」创建</i>`;
       } else {
         for (let i = 0; i < Math.min(replies.length, 10); i++) {
           const r = replies[i];
-          text += `┌─ ${i + 1}. ⚡ ${escapeHtml(r.title)}\n│ ${escapeHtml(trunc(r.content, 30))}\n└───────────┘\n`;
+          text += `\n${i + 1}. ⚡ <b>${escapeHtml(r.title)}</b>\n   ${escapeHtml(trunc(r.content, 35))}`;
         }
       }
 
@@ -1474,7 +1579,7 @@ export function createBot(env: Env) {
         ]);
       }
       keyboard.push([{ text: '➕ 添加', callback_data: 'add_quick_reply' }]);
-      keyboard.push([{ text: '◀ 回复管理', callback_data: 'reply_mgmt' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 回复管理', callback_data: 'reply_mgmt' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
 
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
@@ -1485,27 +1590,27 @@ export function createBot(env: Env) {
   async function showScheduledMessages(chatId: number, messageId?: number): Promise<void> {
     try {
       const messages = await db.getAllScheduledMessages();
-      let text = `<b>╔══ 定时消息 ══╗</b>  ${messages.length} 条\n\n`;
+      const pending = messages.filter(m => !m.is_sent).length;
+      let text = head('⏰ 定时消息', `共 ${messages.length} 条 · 待发送 ${pending} 条`);
       if (messages.length === 0) {
-        text += `<i>暂无定时消息</i>`;
+        text += `\n\n<i>暂无定时消息，点击下方按钮创建</i>`;
       } else {
         for (const msg of messages.slice(0, 10)) {
           const time = fmtTime(msg.scheduled_at);
           const status = msg.is_sent ? '✅ 已发送' : '⏳ 待发送';
-          const target = msg.user_id ? `用户${msg.user_id}` : '所有人';
-          text += `┌─ ${status}\n│ 🎯 ${target}\n│ 🕐 ${time}\n│ 📝 ${escapeHtml(trunc(msg.content, 25))}\n└───────────┘\n`;
+          const target = msg.user_id ? `用户 <code>${msg.user_id}</code>` : '📢 所有人';
+          text += `\n${status} · 🎯 ${target}\n   🕐 ${time} · ${escapeHtml(trunc(msg.content, 25))}`;
         }
-        if (messages.length > 10) text += `<i>…仅显示前 10 条</i>\n`;
+        if (messages.length > 10) text += `\n<i>…仅显示前 10 条</i>`;
       }
 
       const keyboard: KbRow[] = [];
-      keyboard.push([{ text: '📢 群发所有人', callback_data: 'new_scheduled_all' }]);
-      keyboard.push([{ text: '👤 发给指定用户', callback_data: 'user_list' }]);
+      keyboard.push([{ text: '📢 群发所有人', callback_data: 'new_scheduled_all' }, { text: '👤 发给指定用户', callback_data: 'user_list' }]);
       for (const msg of messages.filter(m => !m.is_sent).slice(0, 3)) {
         const target = msg.user_id ? `用户${msg.user_id}` : '所有人';
         keyboard.push([{ text: `🗑️ 删除: ${target}`, callback_data: `del_scheduled_${msg.id}` }]);
       }
-      keyboard.push([{ text: '🏠 主页', callback_data: 'admin_back' }]);
+      keyboard.push([{ text: '🔙 自动化', callback_data: 'hub_auto' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
@@ -1515,18 +1620,17 @@ export function createBot(env: Env) {
   async function showAuditLog(chatId: number, messageId?: number): Promise<void> {
     try {
       const logs = await db.getAuditLogs(20);
-      let text = `<b>╔══ 审计日志 ══╗</b>\n\n`;
+      let text = head('📝 审计日志', `最近 ${logs.length} 条`);
       if (logs.length === 0) {
-        text += `<i>暂无操作记录</i>`;
+        text += `\n\n<i>暂无操作记录</i>`;
       } else {
         for (const entry of logs.slice(0, 15)) {
-          const time = fmtTime(entry.created_at);
-          text += `┌─ 🕐 ${time}\n│ 📋 ${escapeHtml(entry.action)}${entry.target_id ? ` → ${escapeHtml(entry.target_id)}` : ''}\n└───────────┘\n`;
+          text += `\n🕐 ${fmtTime(entry.created_at)} · <b>${escapeHtml(entry.action)}</b>${entry.target_id ? ` → ${escapeHtml(entry.target_id)}` : ''}`;
         }
       }
 
       await editOrSend(chatId, text, {
-        reply_markup: mk([{ text: '🏠 主页', callback_data: 'admin_back' }])
+        reply_markup: mk([{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }])
       }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
@@ -1536,18 +1640,14 @@ export function createBot(env: Env) {
   async function showBackupPanel(chatId: number, messageId?: number): Promise<void> {
     try {
       const stats = await db.getPmStats();
-      const text = `<b>╔══ 数据备份 ══╗</b>\n\n` +
-        `┌─ 数据概览 ─┐\n` +
-        `│ 👥 用户: ${stats.totalUsers}\n` +
-        `│ 💬 消息: ${stats.totalMessages}\n` +
-        `│ 🚫 封禁: ${stats.blockedUsers}\n` +
-        `└───────────┘\n\n` +
-        `<i>点击下方按钮导出数据</i>`;
+      const text = head('💾 数据备份') +
+        `\n\n👥 用户 <b>${stats.totalUsers}</b> · 💬 消息 <b>${stats.totalMessages}</b> · 🚫 封禁 <b>${stats.blockedUsers}</b>` +
+        tip('点击下方按钮导出数据');
 
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: '📥 导出JSON', callback_data: 'export_json' }],
-          [{ text: '🏠 主页', callback_data: 'admin_back' }]
+          [{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1573,35 +1673,27 @@ export function createBot(env: Env) {
     ['blacklist', async (ctx) => { await showBlacklistKeywords(ctx.chatId, 0, ctx.msgId); }],
     ['work_hours', async (ctx) => { await showWorkHoursSettings(ctx.chatId, ctx.msgId); }],
     ['help', async (ctx) => {
-      const helpText = '<b>╔══ 使用帮助 ══╗</b>\n\n' +
-        '┌─ 当前版本 ─┐\n' +
-        `📦 v${BOT_VERSION}\n` +
-        '└───────────┘\n\n' +
-        '┌─ 功能说明 ─┐\n' +
-        '📌 👥 用户管理 - 查看/管理所有用户\n' +
-        '📌 📨 待处理 - 查看待处理消息\n' +
-        '📌 📊 数据统计 - 查看消息/用户统计\n' +
-        '📌 📢 群发消息 - 向所有用户发送通知\n' +
-        '📌 ⚙️ 基础设置 - 欢迎语等系统配置\n' +
-        '📌 💬 自动回复 - 关键词匹配自动回复\n' +
-        '📌 🔒 黑名单 - 过滤垃圾/广告消息\n' +
-        '📌 🕐 工作时间 - 非工作时间自动回复\n' +
-        '📌 🚫 封禁列表 - 封禁/解封用户操作\n' +
-        '📌 ⚡ 快捷回复 - 预设常用回复模板\n' +
-        '📌 ⏰ 定时消息 - 定时发送消息\n' +
-        '📌 📝 审计日志 - 操作记录追踪\n' +
-        '📌 💾 数据备份 - 导出系统数据\n' +
-        '└───────────┘\n\n' +
-        '┌─ 使用提示 ─┐\n' +
-        '💡 所有操作在一个窗口内完成\n' +
-        '💡 点击按钮即可切换不同功能\n' +
-        '💡 管理员可直接回复用户消息\n' +
-        '💡 用户详情支持标签/备注管理\n' +
-        '└───────────┘';
+      const helpText = head('❓ 使用帮助', `版本 v${BOT_VERSION}`) +
+        sec('功能导航') +
+        '\n📨 <b>消息中心</b> — 待处理 / 未读 / 统计' +
+        '\n👥 <b>用户中心</b> — 用户 / 封禁 / 群发' +
+        '\n🤖 <b>自动化</b> — 自动回复 / 快捷回复 / 定时' +
+        '\n⚙️ <b>系统</b> — 设置 / 过滤 / 审计 / 备份' +
+        sec('日常操作') +
+        '\n• 点击按钮即可在窗口内切换面板' +
+        '\n• <b>回复</b>用户转发的消息即可直接回复对方' +
+        '\n• 用户详情支持标签 / 备注 / 历史 / 封禁' +
+        sec('提示') +
+        '\n• 消息面板内的「忽略」不会删除消息记录' +
+        '\n• 输入会话中随时点「取消」退出';
       await editOrSend(ctx.chatId, helpText, { reply_markup: mk([{ text: '🏠 主页', callback_data: 'admin_back' }]) }, ctx.msgId);
     }],
     ['admin_back', async (ctx) => { await showAdminPanel(ctx.chatId, ctx.msgId); }],
     ['back_to_admin', async (ctx) => { await showAdminPanel(ctx.chatId, ctx.msgId); }],
+    ['hub_msgs', async (ctx) => { await showMsgHub(ctx.chatId, ctx.msgId); }],
+    ['hub_users', async (ctx) => { await showUserHub(ctx.chatId, ctx.msgId); }],
+    ['hub_auto', async (ctx) => { await showAutoHub(ctx.chatId, ctx.msgId); }],
+    ['hub_sys', async (ctx) => { await showSysHub(ctx.chatId, ctx.msgId); }],
     ['add_auto_reply', async (ctx) => {
       await promptInput(ctx, 'add_auto_reply', '添加自动回复',
         `${inputFormat([['关键词|回复内容|匹配类型', '你好|你好！有什么可以帮您的？|exact']])}\n\n匹配类型: <b>exact</b>(精确) / <b>contains</b>(包含) / <b>regex</b>(正则)`,
@@ -1656,8 +1748,8 @@ export function createBot(env: Env) {
       if (data === null) { await showFail(ctx.chatId, ctx.msgId, '导出'); return; }
       const json = JSON.stringify(data, null, 2);
       const truncated = json.length > 3500 ? json.substring(0, 3500) + '\n\n... (数据过大，已截断)' : json;
-      await editOrSend(ctx.chatId, `<b>📥 数据导出</b>\n\n<code>${escapeHtml(truncated)}</code>`, {
-        reply_markup: mk([{ text: '🏠 主页', callback_data: 'admin_back' }])
+      await editOrSend(ctx.chatId, head('📥 数据导出') + `\n\n<code>${escapeHtml(truncated)}</code>`, {
+        reply_markup: mk([{ text: '🔙 数据备份', callback_data: 'backup' }, { text: '🏠 主页', callback_data: 'admin_back' }])
       }, ctx.msgId);
       // 审计日志与用户看到的导出结果无关，异步落库不阻塞回包
       fire(db.addAuditLog(ctx.userId, 'export_data', 'system', 'all', 'JSON export'));
@@ -1686,7 +1778,11 @@ export function createBot(env: Env) {
       if (reply === null) { await showFail(ctx.chatId, ctx.msgId, '加载'); return; }
       if (!reply) { await editOrSend(ctx.chatId, '❌ 规则不存在', undefined, ctx.msgId); return; }
       await editOrSend(ctx.chatId,
-        '<b>╔══ 自动回复规则 ══╗</b>\n\n🔑 <b>关键词:</b> ' + escapeHtml(reply.keyword) + '\n📝 <b>回复内容:</b>\n' + escapeHtml(reply.reply_text) + '\n📋 <b>匹配类型:</b> ' + reply.match_type + '\n状态: ' + (reply.is_enabled ? '✅ 已启用' : '⏸️ 已禁用') + '\n\n请选择操作：', {
+        head('🤖 自动回复规则') +
+        '\n\n🔑 <b>关键词:</b> ' + escapeHtml(reply.keyword) +
+        '\n📝 <b>回复内容:</b>\n' + escapeHtml(reply.reply_text) +
+        '\n📋 <b>匹配类型:</b> ' + reply.match_type +
+        '\n状态: ' + (reply.is_enabled ? '🟢 已启用' : '⏸️ 已禁用'), {
           reply_markup: mk([{ text: reply.is_enabled ? '⏸️ 禁用' : '✅ 启用', callback_data: 'toggle_auto_reply_' + replyId }, { text: '🗑️ 删除', callback_data: 'delete_auto_reply_' + replyId }], [{ text: '◀ 返回列表', callback_data: 'auto_replies' }])
         }, ctx.msgId);
     }},
@@ -1713,7 +1809,11 @@ export function createBot(env: Env) {
       if (kw === null) { await showFail(ctx.chatId, ctx.msgId, '加载'); return; }
       if (!kw) { await editOrSend(ctx.chatId, '❌ 关键词不存在', undefined, ctx.msgId); return; }
       await editOrSend(ctx.chatId,
-        '<b>╔══ 黑名单关键词 ══╗</b>\n\n🔑 <b>关键词:</b> ' + escapeHtml(kw.keyword) + '\n📋 <b>类型:</b> ' + (kw.is_regex ? '正则' : '普通') + '\n' + (kw.reason ? '📝 <b>原因:</b> ' + escapeHtml(kw.reason) + '\n' : '') + '状态: ' + (kw.is_enabled ? '✅ 已启用' : '⏸️ 已禁用') + '\n\n请选择操作：', {
+        head('🔒 黑名单关键词') +
+        '\n\n🔑 <b>关键词:</b> ' + escapeHtml(kw.keyword) +
+        '\n📋 <b>类型:</b> ' + (kw.is_regex ? '正则' : '普通') +
+        (kw.reason ? '\n📝 <b>原因:</b> ' + escapeHtml(kw.reason) : '') +
+        '\n状态: ' + (kw.is_enabled ? '🟢 已启用' : '⏸️ 已禁用'), {
         reply_markup: mk(
           [{ text: kw.is_enabled ? '⏸️ 禁用' : '✅ 启用', callback_data: 'toggle_blacklist_' + kwId }, { text: '🗑️ 删除', callback_data: 'delete_blacklist_' + kwId }],
           [{ text: '◀ 返回列表', callback_data: 'blacklist' }]
