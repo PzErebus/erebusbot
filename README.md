@@ -206,28 +206,29 @@ npm run deploy
 
 ---
 
-## 自动部署（GitHub Actions）
+## CI 校验（GitHub Actions）
 
-`.github/workflows/deploy.yml` —— push 到 `main` 时自动跑「类型检查 → 测试 → 部署」；也可在 GitHub 仓库手动触发（workflow_dispatch）。
+`.github/workflows/deploy.yml` —— push 到 `main` 或开 PR 时自动跑「类型检查 → 单元测试」；
+也可在 GitHub 仓库手动触发（workflow_dispatch）。
 
-需要在仓库 **Settings → Secrets and variables → Actions → Secrets** 中添加一个密钥：
+> **部署不放在 CI 里**，刻意留在本地执行：Actions 拿的是仓库级 token，权限面比本地宽，
+> push 即上线一旦误推就直接打到生产。现在的流程是「CI 把守质量 → 本地 `npx wrangler deploy` 上线」。
 
-| Secret 名 | 取值 |
-| --- | --- |
-| `CLOUDFLARE_API_TOKEN` | [My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建的 Token，需勾选 `Account → Cloudflare Workers:Edit` 与 `Account → D1:Edit` |
+因此**不需要**配置任何 Actions Secret（仓库 Secrets 保持为空即可）。
 
-生成后可直接本地跑一次，把 token 交给命令行：
+本地部署仍用同一套凭据，命令如下：
 
 ```bash
-export CLOUDFLARE_API_TOKEN=xxxxxxxxxxxx
 npx wrangler whoami   # 确认已识别账号
-npx wrangler deploy   # 部署 Worker + D1 绑定
+npx wrangler deploy   # 部署 Worker + D1 绑定（secret 用 wrangler secret put 维护）
 ```
 
 注意事项：
 
-- GitHub Actions 里**不会**执行 `version:bump`，避免 `package.json` 改动回写仓库造成下次合并冲突
+- CI 只做只读校验（`contents: read`），不会改动仓库，也不会执行 `version:bump`
 - Worker 名取自 `wrangler.toml` 的 `name = "erebusbot"`，首次部署会直接创建该 Worker
+- 改了 `routes` / `[[durable_objects.bindings]]` 后，除了 `deploy` 还要跑一次 `npx wrangler triggers deploy`，
+  否则线上仍是旧路由（`wrangler deploy` 不带这部分）
 - D1 的 `database_id` 已固化在 `wrangler.toml`，换机器/换环境不需要重新 `wrangler d1 create`
 
 ---

@@ -1,8 +1,9 @@
-name: CI/CD
+name: CI
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -10,8 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: 类型检查 + 测试 + 部署到 Cloudflare Workers
+  verify:
+    name: 类型检查 + 单元测试
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,11 +35,5 @@ jobs:
       - name: Unit & integration tests
         run: npm test
 
-      - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          command: deploy
-        env:
-          # 部署前先写入版本号（wrangler 部署的是 src/index.ts 源码，无需 tsc 产物）
-          GIT_COMMIT: ${{ github.sha }}
+  # 部署刻意留在本地：github.com 上的 token 权限面比本地宽，push 即上线一旦误推就直接打到生产。
+  # 上线用 `npx wrangler deploy`（需先 `wrangler secret put` 维护 secret，并用 triggers deploy 应用路由）。
