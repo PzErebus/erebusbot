@@ -1854,7 +1854,7 @@ export function createBot(env: Env) {
   // ============ Polling Mode ============
   // 用途：Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
   // 此时改用 getUpdates 轮询，彻底绕开「必须有域名」的限制。
-  async function handlePoll(): Promise<{ fetched: number }> {
+  async function handlePoll(): Promise<{ fetched: number; skipped?: boolean }> {
     await ensureDbInitialized();
 
     const lastOffset = parseInt((await db.getSetting(POLL_OFFSET_KEY)) || '0', 10) || 0;
@@ -1867,7 +1867,14 @@ export function createBot(env: Env) {
       const data = await r.json() as { ok?: boolean; result?: TelegramUpdate[]; description?: string };
 
       if (!r.ok || !data.ok) {
-        log.error('getUpdates failed', { status: r.status, description: data.description });
+        // 409 Conflict = 已有另一个 getUpdates 长连接（Cron 与手动触发撞车）。
+        // 此时必须原样返回、不能推进 offset，让下一轮接着拉。
+        const desc = data.description || '';
+        if (r.status === 409 || /conflict/i.test(desc) || /terminated by other getUpdates/i.test(desc)) {
+          log.warn('getUpdates conflict, skip this round', { status: r.status, description: desc });
+          return { fetched, skipped: true };
+        }
+        log.error('getUpdates failed', { status: r.status, description: desc });
         return { fetched };
       }
 

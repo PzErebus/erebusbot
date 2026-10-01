@@ -14,6 +14,31 @@ const log = createLogger('api');
 const VERSION = '202605182048';
 const apiCache = new MemoryCache(60);
 
+// 轮询互斥锁：Cron 与手动触发 /cron/poll 可能重叠，
+// 而 Telegram 同一时刻只允许一个 getUpdates 长连接，重叠会返回 409 Conflict 把两边的轮询都打掉。
+let pollInFlight = false;
+
+async function runPoll(env: Env, source: string): Promise<Record<string, unknown>> {
+  if (pollInFlight) {
+    log.warn('Poll skipped, another poll still in flight', { source });
+    return { ok: true, fetched: 0, skipped: true };
+  }
+  pollInFlight = true;
+  try {
+    const bot = createBot(env);
+    const { fetched } = await bot.handlePoll();
+    if (fetched > 0) {
+      log.info('Poll finished', { source, fetched });
+    }
+    return { ok: true, fetched };
+  } catch (e) {
+    log.error('Cron poll error', { source, error: e });
+    return { ok: false, fetched: 0, error: String(e) };
+  } finally {
+    pollInFlight = false;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -100,17 +125,7 @@ export default {
     // 轮询入口：由 wrangler.toml 的 crons 每分钟触发
     // 在 Telegram 拒绝 webhook 地址（例如 Cloudflare 保留段 IP）时作为替代接收方式
     if (path === '/cron/poll' || path === '/cron/poll/') {
-      try {
-        const bot = createBot(env);
-        const { fetched } = await bot.handlePoll();
-        return createSafeResponse({ ok: true, fetched });
-      } catch (e) {
-        log.error('Cron poll error', { error: e });
-        return new Response('Internal Server Error', {
-          status: 500,
-          headers: generateSecurityHeaders()
-        });
-      }
+      return createSafeResponse(await runPoll(env, 'http'));
     }
 
     if (env.ENVIRONMENT === 'development') {
@@ -229,6 +244,12 @@ export default {
       status: 404,
       headers: generateSecurityHeaders()
     });
+  },
+
+  // Cloudflare Cron 触发器（wrangler.toml 的 [triggers] crons）调用的就是这里。
+  // 少了这个导出，配了 crons 也不会有任何轮询执行——消息会一直卡在 Telegram 服务端。
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await runPoll(env, 'cron');
   },
 };
 

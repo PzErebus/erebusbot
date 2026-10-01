@@ -15,7 +15,8 @@ const state = vi.hoisted(() => ({
   saveMessageCalls: 0,
   fetchUrls: [] as string[],
   updates: [] as unknown[],
-  tgOk: true
+  tgOk: true,
+  tgStatus: 200
 }));
 
 vi.mock('../src/db-optimized', () => ({
@@ -88,6 +89,7 @@ beforeEach(() => {
   state.fetchUrls = [];
   state.updates = [];
   state.tgOk = true;
+  state.tgStatus = 200;
 
   vi.stubGlobal('fetch', async (input: unknown) => {
     const url = String(input);
@@ -95,9 +97,12 @@ beforeEach(() => {
     // getUpdates 走测试可控的返回值；其余（sendMessage 等）一律成功，避免 api() 触发重试退避拖慢测试
     if (url.includes('getUpdates')) {
       return {
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: state.tgOk, result: state.updates })
+        ok: state.tgStatus < 400,
+        status: state.tgStatus,
+        json: async () =>
+          state.tgStatus === 409
+            ? { ok: false, result: [], description: 'Conflict: terminated by other getUpdates request' }
+            : { ok: state.tgOk, result: state.updates }
       };
     }
     return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) };
@@ -186,6 +191,18 @@ describe('handlePoll 轮询主流程', () => {
     expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '5003']);
   });
 
+  it('getUpdates 返回 409 Conflict 时跳过本轮且**不**推进 offset', async () => {
+    state.updates = [userMessage(7001, 'ping')];
+    state.tgStatus = 409;
+
+    const bot = createBot(makeEnv());
+    const result = await bot.handlePoll();
+
+    expect(result.fetched).toBe(0);
+    // 关键：offset 不能前进，否则 409 期间积压的消息会被永久跳过
+    expect(state.updateSettingCalls).toHaveLength(0);
+  });
+
   it('请求时才调用 getUpdates 且带上 allowed_updates', async () => {
     state.updates = [];
 
@@ -196,5 +213,21 @@ describe('handlePoll 轮询主流程', () => {
     expect(url).toContain('api.telegram.org/bot123456:TEST/getUpdates');
     expect(url).toContain('allowed_updates=');
     expect(decodeURIComponent(url)).toContain('"callback_query"');
+  });
+});
+
+describe('Cron 触发器入口', () => {
+  it('Worker 必须导出 scheduled —— 漏掉它 crons 配了也不会跑轮询', async () => {
+    const worker = (await import('../src/index')).default;
+    expect(typeof worker.scheduled).toBe('function');
+  });
+
+  it('scheduled() 会真正拉一次消息并推进 offset', async () => {
+    const worker = (await import('../src/index')).default;
+    state.updates = [userMessage(8001, 'ping')];
+
+    await worker.scheduled({} as never, makeEnv());
+
+    expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '8002']);
   });
 });
