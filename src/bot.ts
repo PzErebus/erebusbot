@@ -11,6 +11,8 @@ const log = createLogger('bot');
 const globalCache = new MemoryCache(60);
 const updateDeduplication = new Set<number>();
 const MAX_DEDUP_SIZE = 10000;
+/** 轮询模式下已消费到的 Telegram update_id（+1 存），落 pm_settings 表 */
+const POLL_OFFSET_KEY = 'tg_poll_offset';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -1805,13 +1807,9 @@ export function createBot(env: Env) {
     }
   }
 
-  // ============ Main Update Handler ============
-  async function handleUpdate(update: TelegramUpdate): Promise<void> {
-    if (!update.update_id) return;
-    if (updateDeduplication.size >= MAX_DEDUP_SIZE) updateDeduplication.clear();
-    if (updateDeduplication.has(update.update_id)) return;
-    updateDeduplication.add(update.update_id);
-
+  // ============ Update Dispatcher ============
+  // 与去重解耦：webhook 用内存去重，轮询用 Telegram 的 offset 持久化去重
+  async function dispatchUpdate(update: TelegramUpdate): Promise<void> {
     if (!update.message && !update.callback_query) return;
 
     try {
@@ -1843,5 +1841,61 @@ export function createBot(env: Env) {
     }
   }
 
-  return { handleUpdate };
+  // ============ Main Update Handler (webhook) ============
+  async function handleUpdate(update: TelegramUpdate): Promise<void> {
+    if (!update.update_id) return;
+    if (updateDeduplication.size >= MAX_DEDUP_SIZE) updateDeduplication.clear();
+    if (updateDeduplication.has(update.update_id)) return;
+    updateDeduplication.add(update.update_id);
+
+    await dispatchUpdate(update);
+  }
+
+  // ============ Polling Mode ============
+  // 用途：Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
+  // 此时改用 getUpdates 轮询，彻底绕开「必须有域名」的限制。
+  async function handlePoll(): Promise<{ fetched: number }> {
+    await ensureDbInitialized();
+
+    const lastOffset = parseInt((await db.getSetting(POLL_OFFSET_KEY)) || '0', 10) || 0;
+    let fetched = 0;
+
+    try {
+      const url = `https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastOffset + 1}` +
+        `&timeout=25&allowed_updates=${encodeURIComponent('["message","edited_message","callback_query"]')}`;
+      const r = await fetch(url, { method: 'POST' });
+      const data = await r.json() as { ok?: boolean; result?: TelegramUpdate[]; description?: string };
+
+      if (!r.ok || !data.ok) {
+        log.error('getUpdates failed', { status: r.status, description: data.description });
+        return { fetched };
+      }
+
+      const updates = (data.result || []).slice().sort((a, b) => a.update_id - b.update_id);
+      if (!updates.length) return { fetched };
+
+      for (const u of updates) {
+        // Bot 自己发出的消息同样会出现在 getUpdates 结果里，
+        // 不过滤会被当成「来自管理员的新消息」再次转发，形成死循环刷屏。
+        if (u.message?.from?.is_bot || u.callback_query?.from?.is_bot) continue;
+
+        fetched++;
+        try {
+          await dispatchUpdate(u);
+        } catch (e) {
+          // 单条失败不能中断整批，否则 offset 不前进会反复重试同一条
+          log.error('Poll dispatch error', { update_id: u.update_id, error: e });
+        }
+      }
+
+      const maxId = updates[updates.length - 1].update_id;
+      await db.updateSetting(POLL_OFFSET_KEY, String(maxId + 1));
+    } catch (e) {
+      log.error('Poll failed', { error: e });
+    }
+
+    return { fetched };
+  }
+
+  return { handleUpdate, handlePoll };
 }

@@ -24,3 +24,10 @@ database_id = "e91a400b-f65a-4643-90e4-02fb3558551b"
 routes = [
   { pattern = "pm.erebus.de5.net/*", zone_name = "erebus.de5.net" }
 ]
+
+# 轮询触发器（替代 webhook）
+# Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
+# 因此改由 Cron 每分钟调 /cron/poll 走 getUpdates 拉消息。
+# 最小粒度为 1 分钟，实测延迟约 1 分钟
+[triggers]
+crons = ["*/1 * * * *"]

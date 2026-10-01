@@ -97,6 +97,22 @@ export default {
       }
     }
 
+    // 轮询入口：由 wrangler.toml 的 crons 每分钟触发
+    // 在 Telegram 拒绝 webhook 地址（例如 Cloudflare 保留段 IP）时作为替代接收方式
+    if (path === '/cron/poll' || path === '/cron/poll/') {
+      try {
+        const bot = createBot(env);
+        const { fetched } = await bot.handlePoll();
+        return createSafeResponse({ ok: true, fetched });
+      } catch (e) {
+        log.error('Cron poll error', { error: e });
+        return new Response('Internal Server Error', {
+          status: 500,
+          headers: generateSecurityHeaders()
+        });
+      }
+    }
+
     if (env.ENVIRONMENT === 'development') {
       const debugResult = await handleDebugEndpoints(request, env, path);
       if (debugResult) {

@@ -232,6 +232,25 @@ npx wrangler deploy   # 部署 Worker + D1 绑定
 
 ---
 
+## 消息接收模式：轮询（默认）
+
+Telegram 的 `setWebhook` 会**直接拒绝**解析到 `198.18.0.0/15`（Cloudflare 保留 anycast 段）的地址——
+也就是 `*.workers.dev` 和 CF 自定义域名的默认解析结果，错误会被包装成
+`Failed to resolve host: Name or service not known`，实际是那个保留段不可路由。
+
+因此本项目默认走 **Cron 轮询**接收消息，不再依赖 webhook 域名：
+
+- `wrangler.toml` 的 `[triggers] crons = ["*/1 * * * *"]` 每分钟触发 `/cron/poll`
+- `bot.handlePoll()` 调 `getUpdates`，从 `pm_settings` 表读 `tg_poll_offset` 作起点
+- 处理完把 `update_id + 1` 写回，天然去重；单条失败不中断整批，offset 仍前进
+- **必须过滤 `from.is_bot`**：Bot 自己发出的消息也会出现在 `getUpdates` 结果里，
+  不过滤会被当成「新消息」再转发一次，形成死循环刷屏
+
+代价是约 1 分钟延迟（CF Cron 最小粒度就是 1 分钟）。若要改回 webhook 模式，
+把 `[triggers]` 删掉、执行 `setWebhook`，并在 `dispatchUpdate` 处接回 `handleUpdate` 即可。
+
+---
+
 ## 技术栈
 
 - **运行时**: Cloudflare Workers (Edge)
