@@ -247,14 +247,14 @@ Telegram 的 `setWebhook` 会**直接拒绝**解析到 `198.18.0.0/15`（Cloudfl
 - **必须过滤 `from.is_bot`**：Bot 自己发出的消息也会出现在 `getUpdates` 结果里，
   不过滤会被当成「新消息」再转发一次，形成死循环刷屏
 
-### 高频轮询：Durable Object 闹钟（延迟 0~15 秒）
+### 高频轮询：Durable Object 闹钟（延迟 ~0~2 秒，最坏 10 秒）
 
 Cron 的最小粒度是 1 分钟，光靠它最坏要等满 60 秒才响应。所以高频轮询下沉到
 **`PollerDO` Durable Object 的 alarm**（alarm 精度可到秒级）：
 
 | 角色 | 职责 |
 |---|---|
-| `PollerDO.alarm()` | **唯一**调用 `getUpdates` 的地方，每 15 秒一轮，跑完立刻续下个闹钟 |
+| `PollerDO.alarm()` | **唯一**调用 `getUpdates` 的地方，每 10 秒一轮，一开始就排下一轮 |
 | Cron `scheduled()` | 只做看门狗：调 DO 的 `/nudge` 对齐闹钟；DO 失效才兜底直接轮询 |
 | `/cron/poll` | 手动触发排查用（带进程内互斥锁） |
 
@@ -266,11 +266,18 @@ Cron 的最小粒度是 1 分钟，光靠它最坏要等满 60 秒才响应。�
 2. **409 时绝不推进 offset**，原样返回让下一轮接着拉。
 3. **alarm 抛错也要续期**（失败则间隔翻倍，上限 60 秒），否则闹钟链一断整个 bot 静默失联。
 
-调延迟：改 `wrangler.toml` 的 `POLL_INTERVAL_MS`（5s~60s，默认 15000）后重新部署。
-注意本次长轮询 `timeout` 会取 `interval - 3` 秒——**超时必须小于间隔**，否则上一轮还没返回，下一轮就撞 409。
+调延迟：改 `wrangler.toml` 的 `POLL_INTERVAL_MS`（5s~60s，默认 10000）后重新部署。
+
+> **下轮闹钟要从「本轮起点」排，不能从「本轮结束」排。**
+> `getUpdates` 是长轮询，空消息时最长会阻塞 `timeout` 秒。若在 `await` 返回后再
+> `setAlarm(Date.now() + interval)`，真实周期就变成 `timeout + interval`（实测 10 + 15 = 25 秒），
+> 消息最坏要等满 25 秒。改成进函数就 `setAlarm(startedAt + interval)` 后，周期收敛回 `interval` 本身。
+> 另外 `timeout` 取 `interval - 2` 秒——**超时必须小于间隔**，否则上一轮还没返回，下一轮就撞 409。
+> 收敛后因为长连接覆盖了每轮前 8 秒，约 80% 的消息是**长连接当场带回**的，实际体感延迟远小于间隔。
 
 自检端点：`GET /poll-state` 返回 `pollCount`（alarm 累计执行次数）、`nextAlarmAt`（下次闹钟）、
-`lastFetched`（最近一批拉到几条）。`pollCount` 停止增长就说明闹钟链断了。
+`lastFetched`（最近一批拉到几条）、`lastDurationMs`（上一轮 `getUpdates` 耗时）。
+`pollCount` 停止增长就说明闹钟链断了；`lastDurationMs` 接近 `interval - 2` 说明该轮是空等返回的。
 
 > 踩坑记录：wrangler 把 DO 绑定暴露成 `DurableObjectNamespace`，
 > 必须用 `ns.get(ns.idFromName('default'))` 拿 stub；**方法不能从对象上取出来单独调用**，

@@ -6,8 +6,10 @@ workers_dev = true
 
 [vars]
 LANGUAGE = "zh_CN"
-# 轮询间隔（毫秒），5s~60s。DO alarm 精度到秒级，15s 时响应延迟约 0~15s（原来靠 1 分钟 Cron 最坏 60s）
-POLL_INTERVAL_MS = 15000
+# 轮询间隔（毫秒），5s~60s。DO alarm 精度到秒级；周期已收敛为 interval 本身（不再叠加长轮询耗时），
+# 10s 对应响应延迟 0~10s，均值 ~5s。原来靠 1 分钟 Cron 最坏 60s。
+# 注意：不要小于 5s，getUpdates 的 timeout 会自动取 interval-2，太密只会白烧 alarm/D1 配额。
+POLL_INTERVAL_MS = 10000
 
 # Secrets（通过 Cloudflare Dashboard 或 wrangler secret put 设置）
 # BOT_TOKEN       - 从 @BotFather 获取的 Bot Token

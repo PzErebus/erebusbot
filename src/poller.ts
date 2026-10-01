@@ -15,7 +15,8 @@ import { createLogger } from './logger';
 
 const log = createLogger('poller');
 
-export const DEFAULT_POLL_INTERVAL_MS = 15000;
+// 上一版是 15000 且存在「timeout + interval」的累加周期，实测消息最坏要等 ~25s。
+export const DEFAULT_POLL_INTERVAL_MS = 10000;
 
 function pollIntervalMs(env: Env): number {
   const raw = Number(env.POLL_INTERVAL_MS);
@@ -44,7 +45,8 @@ export class PollerDO {
           nextAlarmAt: next,
           nextAlarmInMs: next === null ? null : Math.max(0, next - Date.now()),
           pollCount: await this.#stat('pollCount'),
-          lastFetched: await this.#stat('lastFetched')
+          lastFetched: await this.#stat('lastFetched'),
+          lastDurationMs: await this.#stat('lastDurationMs')
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       );
@@ -71,24 +73,32 @@ export class PollerDO {
     return ((await this.ctx.storage.get<number>(key)) ?? 0) as number;
   }
 
-  /** 定时循环：拉一批 -> 立刻续上下一次闹钟（异常也不能断链） */
+  /** 定时循环：拉一批 -> 续上下一次闹钟（异常也不能断链） */
   async alarm(): Promise<void> {
-    let interval = pollIntervalMs(this.env);
+    const interval = pollIntervalMs(this.env);
+    // 关键：长轮询最长会阻塞 timeout 秒，若按「本轮结束」排下一轮闹钟，
+    // 周期会变成 timeout + interval（如 10 + 15 = 25s），消息最坏要等满 25 秒。
+    // 改为从「本轮起点」排，周期收敛回 interval 本身。
+    const startedAt = Date.now();
+
+    // 一开始就落闹钟：即便后面 import/poll 抛错，闹钟链也不会断
+    await this.ctx.storage.setAlarm(startedAt + interval);
+
+    const timeout = Math.max(3, Math.min(25, Math.floor(interval / 1000) - 2));
     try {
       const { createBot } = await import('./bot');
-      const { fetched } = await createBot(this.env).handlePoll(
-        Math.max(3, Math.min(10, Math.floor(interval / 1000) - 3))
-      );
+      const t0 = Date.now();
+      const { fetched } = await createBot(this.env).handlePoll(timeout);
+      const durationMs = Date.now() - t0;
       await this.ctx.storage.put('pollCount', (await this.#stat('pollCount')) + 1);
+      await this.ctx.storage.put('lastDurationMs', durationMs);
       if (fetched > 0) {
         await this.ctx.storage.put('lastFetched', fetched);
-        log.info('Poll finished', { source: 'do-alarm', fetched });
+        log.info('Poll finished', { source: 'do-alarm', fetched, durationMs });
       }
     } catch (e) {
       // 失败也要续期，否则闹钟链断掉后整个 bot 静默失联
       log.error('PollerDO alarm error', { error: e });
-      interval = Math.min(interval * 2, 60000);
     }
-    await this.ctx.storage.setAlarm(Date.now() + interval);
   }
 }

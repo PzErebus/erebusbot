@@ -245,8 +245,11 @@ describe('PollerDO 闹钟轮询器', () => {
   function fakeCtx(initialAlarm: number | null = null) {
     let alarm = initialAlarm;
     const setAt: number[] = [];
+    // 统计值（pollCount / lastDurationMs）也用真实 Map 存，避免 #stat 打不到让断言形同虚设
+    const store = new Map<string, unknown>();
     return {
       setAt,
+      store,
       alarmTick: () => alarm,
       ctx: {
         storage: {
@@ -254,6 +257,10 @@ describe('PollerDO 闹钟轮询器', () => {
           setAlarm: async (v: number) => {
             alarm = v;
             setAt.push(v);
+          },
+          get: async <T>(k: string) => store.get(k) as T | undefined,
+          put: async (k: string, v: unknown) => {
+            store.set(k, v);
           }
         },
         // 让 handler 跑完再读闹钟，模拟真实执行顺序
@@ -286,6 +293,40 @@ describe('PollerDO 闹钟轮询器', () => {
     await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
 
     expect(fake.setAt).toHaveLength(1);
+  });
+
+  it('下一轮闹钟按「本轮起点」排，长轮询耗时不会累加进周期', async () => {
+    const { PollerDO } = await import('../src/poller');
+    const { DEFAULT_POLL_INTERVAL_MS } = await import('../src/poller');
+    const fake = fakeCtx(null);
+
+    // 制造 ~250ms 的长轮询耗时：若按「本轮结束」排闹钟，周期会被推迟这么多
+    state.updates = [userMessage(9100, 'slow-ack')];
+    const origFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('getUpdates')) {
+        await new Promise((r) => setTimeout(r, 250));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, result: state.updates })
+        } as Response;
+      }
+      return origFetch(input, init);
+    });
+
+    const before = Date.now();
+    const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
+    await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
+    globalThis.fetch = origFetch;
+
+    const elapsed = Date.now() - before;
+    const next = fake.setAt[0]!;
+    // 闹钟应落在「起点 + interval」，而不是「起点 + interval + 长轮询耗时」
+    expect(elapsed).toBeGreaterThan(200);
+    expect(next - before).toBeLessThanOrEqual(DEFAULT_POLL_INTERVAL_MS + 50);
+    expect(next - before).toBeGreaterThan(DEFAULT_POLL_INTERVAL_MS - 100);
   });
 
   it('nudge 只在闹钟缺失或过于遥远时才重排，不打断正在等待的那一轮', async () => {
