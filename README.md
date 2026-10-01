@@ -246,8 +246,36 @@ Telegram 的 `setWebhook` 会**直接拒绝**解析到 `198.18.0.0/15`（Cloudfl
 - **必须过滤 `from.is_bot`**：Bot 自己发出的消息也会出现在 `getUpdates` 结果里，
   不过滤会被当成「新消息」再转发一次，形成死循环刷屏
 
-代价是约 1 分钟延迟（CF Cron 最小粒度就是 1 分钟）。若要改回 webhook 模式，
-把 `[triggers]` 删掉、执行 `setWebhook`，并在 `dispatchUpdate` 处接回 `handleUpdate` 即可。
+### 高频轮询：Durable Object 闹钟（延迟 0~15 秒）
+
+Cron 的最小粒度是 1 分钟，光靠它最坏要等满 60 秒才响应。所以高频轮询下沉到
+**`PollerDO` Durable Object 的 alarm**（alarm 精度可到秒级）：
+
+| 角色 | 职责 |
+|---|---|
+| `PollerDO.alarm()` | **唯一**调用 `getUpdates` 的地方，每 15 秒一轮，跑完立刻续下个闹钟 |
+| Cron `scheduled()` | 只做看门狗：调 DO 的 `/nudge` 对齐闹钟；DO 失效才兜底直接轮询 |
+| `/cron/poll` | 手动触发排查用（带进程内互斥锁） |
+
+三条必须守住的约束：
+
+1. **全局只有 DO 能轮询**。Cron 兜底路径一旦和 DO 同时调 `getUpdates`，
+   Telegram 会回 `409 Conflict: terminated by other getUpdates request`，
+   两边的 offset 推进都会乱，消息可能被跳过。
+2. **409 时绝不推进 offset**，原样返回让下一轮接着拉。
+3. **alarm 抛错也要续期**（失败则间隔翻倍，上限 60 秒），否则闹钟链一断整个 bot 静默失联。
+
+调延迟：改 `wrangler.toml` 的 `POLL_INTERVAL_MS`（5s~60s，默认 15000）后重新部署。
+注意本次长轮询 `timeout` 会取 `interval - 3` 秒——**超时必须小于间隔**，否则上一轮还没返回，下一轮就撞 409。
+
+自检端点：`GET /poll-state` 返回 `pollCount`（alarm 累计执行次数）、`nextAlarmAt`（下次闹钟）、
+`lastFetched`（最近一批拉到几条）。`pollCount` 停止增长就说明闹钟链断了。
+
+> 踩坑记录：wrangler 把 DO 绑定暴露成 `DurableObjectNamespace`，
+> 必须用 `ns.get(ns.idFromName('default'))` 拿 stub；**方法不能从对象上取出来单独调用**，
+> 会抛 `Illegal invocation: function called with incorrect this reference`。
+
+若要改回 webhook 模式：删掉 `[triggers]` 与 DO 绑定、`setWebhook`，并在 `dispatchUpdate` 处接回 `handleUpdate`。
 
 ---
 

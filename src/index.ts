@@ -14,28 +14,54 @@ const log = createLogger('api');
 const VERSION = '202605182048';
 const apiCache = new MemoryCache(60);
 
-// 轮询互斥锁：Cron 与手动触发 /cron/poll 可能重叠，
-// 而 Telegram 同一时刻只允许一个 getUpdates 长连接，重叠会返回 409 Conflict 把两边的轮询都打掉。
-let pollInFlight = false;
+// 轮询的实际执行器（互斥锁也在这里）：Cron 与手动触发 /cron/poll 共用
+import { runPoll } from './poll';
+export { runPoll };
+// 轮询器 Durable Object：Cron 最小粒度 1 分钟太慢，真正的高频轮询由它的 alarm 承担
+export { PollerDO } from './poller';
 
-async function runPoll(env: Env, source: string): Promise<Record<string, unknown>> {
-  if (pollInFlight) {
-    log.warn('Poll skipped, another poll still in flight', { source });
-    return { ok: true, fetched: 0, skipped: true };
+/**
+ * 取 PollerDO 的 stub。
+ * 当前 wrangler 把 DO 绑定暴露成 DurableObjectNamespace（get(idFromName(name)) 拿 stub），
+ * 旧版可能是 Fetcher（直接 fetch）。两种都兼容，避免版本差异把看门狗打断。
+ */
+type PollerStub = { fetch: (url: string, init?: RequestInit) => Promise<Response> };
+
+type PollerNamespace = {
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
+  get?: (id: unknown) => PollerStub;
+  idFromName?: (name: string) => unknown;
+};
+
+function getPollerStub(env: Env): PollerStub | null {
+  const ns = env.POLLER as unknown as PollerNamespace | undefined;
+  if (!ns) return null;
+
+  // 关键：DO 命名空间的方法必须以「方法形式」调用（ns.get(...)），
+  // 单独取出来当函数调用会抛 Illegal invocation。所以统一用箭头函数包一层转发。
+  if (typeof ns.fetch === 'function') {
+    return { fetch: (url, init) => ns.fetch!(url, init) };
   }
-  pollInFlight = true;
+  if (typeof ns.get === 'function' && typeof ns.idFromName === 'function') {
+    return { fetch: (url, init) => ns.get!(ns.idFromName!('default')).fetch(url, init) };
+  }
+  return null;
+}
+
+/**
+ * Cron 只做看门狗：唤醒 PollerDO 对齐闹钟。
+ * DO 万一失效，退回直接轮询一次，宁可慢也不静默失联。
+ */
+async function wakePoller(env: Env): Promise<void> {
   try {
-    const bot = createBot(env);
-    const { fetched } = await bot.handlePoll();
-    if (fetched > 0) {
-      log.info('Poll finished', { source, fetched });
-    }
-    return { ok: true, fetched };
+    const stub = getPollerStub(env);
+    if (!stub) throw new Error('POLLER stub unavailable');
+    const res = await stub.fetch('https://poller.internal/nudge', { method: 'POST' });
+    if (!res.ok) throw new Error(`nudge failed: ${res.status}`);
+    return;
   } catch (e) {
-    log.error('Cron poll error', { source, error: e });
-    return { ok: false, fetched: 0, error: String(e) };
-  } finally {
-    pollInFlight = false;
+    log.warn('PollerDO nudge failed, fallback to direct poll', { error: e });
+    await runPoll(env, 'cron-fallback');
   }
 }
 
@@ -126,6 +152,32 @@ export default {
     // 在 Telegram 拒绝 webhook 地址（例如 Cloudflare 保留段 IP）时作为替代接收方式
     if (path === '/cron/poll' || path === '/cron/poll/') {
       return createSafeResponse(await runPoll(env, 'http'));
+    }
+
+    // 轮询器状态（运维自检用：确认 DO 闹钟链还活着）
+    if (path === '/poll-state') {
+      if (!env.POLLER) {
+        return createSafeResponse({ ok: false, error: 'POLLER binding missing' }, 500);
+      }
+      // 绑定形态自检：不同 wrangler 版本下 DO 绑定的形状不同，先把失败原因打清楚
+      const probe = env.POLLER as unknown as {
+        fetch?: unknown;
+        get?: unknown;
+        idFromName?: unknown;
+      };
+      const shape = {
+        fetch: probe.fetch === undefined ? 'undefined' : 'defined',
+        get: probe.get === undefined ? 'undefined' : 'defined',
+        idFromName: probe.idFromName === undefined ? 'undefined' : 'defined'
+      };
+      const stub = getPollerStub(env);
+      if (!stub) {
+        log.warn('POLLER stub unavailable', { shape });
+        return createSafeResponse({ ok: false, error: 'POLLER stub unavailable', shape }, 500);
+      }
+      const res = await stub.fetch('https://poller.internal/status');
+      const body = (await res.text()).replace('}{', `,"bindingShape":${JSON.stringify(shape)}}{`);
+      return new Response(body, { status: res.status, headers: generateSecurityHeaders() });
     }
 
     if (env.ENVIRONMENT === 'development') {
@@ -248,8 +300,9 @@ export default {
 
   // Cloudflare Cron 触发器（wrangler.toml 的 [triggers] crons）调用的就是这里。
   // 少了这个导出，配了 crons 也不会有任何轮询执行——消息会一直卡在 Telegram 服务端。
+  // 这里只唤醒 PollerDO（1 分钟一次的兜底），高频轮询在 DO 的 alarm 里跑。
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    await runPoll(env, 'cron');
+    await wakePoller(env);
   },
 };
 

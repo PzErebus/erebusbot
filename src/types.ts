@@ -12,6 +12,11 @@ export interface Env {
   ADMIN_IDS?: string;
   WEBHOOK_SECRET?: string;
   SILICONFLOW_API_KEY?: string;
+
+  // PollerDO 绑定（wrangler.toml 的 durable_objects.bindings），用于 Cron 唤醒高频轮询器
+  POLLER?: Fetcher;
+  // 轮询间隔（毫秒），默认 15000
+  POLL_INTERVAL_MS?: string;
 }
 
 export interface TelegramUser {

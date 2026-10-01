@@ -1854,15 +1854,17 @@ export function createBot(env: Env) {
   // ============ Polling Mode ============
   // 用途：Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
   // 此时改用 getUpdates 轮询，彻底绕开「必须有域名」的限制。
-  async function handlePoll(): Promise<{ fetched: number; skipped?: boolean }> {
+  async function handlePoll(timeoutSeconds = 10): Promise<{ fetched: number; skipped?: boolean }> {
     await ensureDbInitialized();
 
     const lastOffset = parseInt((await db.getSetting(POLL_OFFSET_KEY)) || '0', 10) || 0;
     let fetched = 0;
 
     try {
+      // timeout 必须小于轮询间隔，否则本次长连接还没返回，下一次轮询就撞上 409。
+      const timeout = Math.max(1, Math.min(timeoutSeconds, 60));
       const url = `https://api.telegram.org/bot${TOKEN}/getUpdates?offset=${lastOffset + 1}` +
-        `&timeout=25&allowed_updates=${encodeURIComponent('["message","edited_message","callback_query"]')}`;
+        `&timeout=${timeout}&allowed_updates=${encodeURIComponent('["message","edited_message","callback_query"]')}`;
       const r = await fetch(url, { method: 'POST' });
       const data = await r.json() as { ok?: boolean; result?: TelegramUpdate[]; description?: string };
 

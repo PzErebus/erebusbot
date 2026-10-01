@@ -191,6 +191,15 @@ describe('handlePoll 轮询主流程', () => {
     expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '5003']);
   });
 
+  it('长轮询超时可配置，且必须小于轮询间隔（否则撞 409）', async () => {
+    state.updates = [];
+
+    const bot = createBot(makeEnv());
+    await bot.handlePoll(5);
+
+    expect(state.fetchUrls[0]).toContain('timeout=5');
+  });
+
   it('getUpdates 返回 409 Conflict 时跳过本轮且**不**推进 offset', async () => {
     state.updates = [userMessage(7001, 'ping')];
     state.tgStatus = 409;
@@ -229,5 +238,66 @@ describe('Cron 触发器入口', () => {
     await worker.scheduled({} as never, makeEnv());
 
     expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '8002']);
+  });
+});
+
+describe('PollerDO 闹钟轮询器', () => {
+  function fakeCtx(initialAlarm: number | null = null) {
+    let alarm = initialAlarm;
+    const setAt: number[] = [];
+    return {
+      setAt,
+      alarmTick: () => alarm,
+      ctx: {
+        storage: {
+          getAlarm: async () => alarm,
+          setAlarm: async (v: number) => {
+            alarm = v;
+            setAt.push(v);
+          }
+        },
+        // 让 handler 跑完再读闹钟，模拟真实执行顺序
+        blockConcurrencyWhile: async (fn: () => Promise<void>) => {
+          await fn();
+        }
+      } as unknown as DurableObjectState
+    };
+  }
+
+  it('alarm 拉一次消息后立即续上下一次闹钟', async () => {
+    const { PollerDO } = await import('../src/poller');
+    const fake = fakeCtx(null);
+    state.updates = [userMessage(9001, 'ping')];
+
+    const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
+    await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
+
+    expect(fake.setAt).toHaveLength(1);
+    expect(fake.setAt[0]!).toBeGreaterThan(Date.now());
+    expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '9002']);
+  });
+
+  it('alarm 抛错时仍然续期，避免闹钟链断掉后整个 bot 静默失联', async () => {
+    const { PollerDO } = await import('../src/poller');
+    const fake = fakeCtx(null);
+    state.tgStatus = 409; // 让 getUpdates 失败
+
+    const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
+    await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
+
+    expect(fake.setAt).toHaveLength(1);
+  });
+
+  it('nudge 只在闹钟缺失或过于遥远时才重排，不打断正在等待的那一轮', async () => {
+    const { PollerDO } = await import('../src/poller');
+    const soon = Date.now() + 5000;
+    const fake = fakeCtx(soon);
+
+    const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
+    const res = await doInstance.fetch(new Request('https://poller.internal/nudge', { method: 'POST' }));
+    const body = (await res.json()) as { rescheduled: boolean };
+
+    expect(body.rescheduled).toBe(false);
+    expect(fake.alarmTick()).toBe(soon);
   });
 });

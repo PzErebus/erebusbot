@@ -6,6 +6,8 @@ workers_dev = true
 
 [vars]
 LANGUAGE = "zh_CN"
+# 轮询间隔（毫秒），5s~60s。DO alarm 精度到秒级，15s 时响应延迟约 0~15s（原来靠 1 分钟 Cron 最坏 60s）
+POLL_INTERVAL_MS = 15000
 
 # Secrets（通过 Cloudflare Dashboard 或 wrangler secret put 设置）
 # BOT_TOKEN       - 从 @BotFather 获取的 Bot Token
@@ -35,3 +37,13 @@ routes = [
 # 最小粒度为 1 分钟，实测延迟约 1 分钟
 [triggers]
 crons = ["*/1 * * * *"]
+
+# 高频轮询由 PollerDO 的 alarm 驱动（Cron 最小粒度 1 分钟，延迟太大）。
+# 这里的 crons 只当看门狗：每分钟唤醒 DO 对齐闹钟；DO 失效时兜底轮询一次。
+[[migrations]]
+tag = "v2_poller"
+new_sqlite_classes = ["PollerDO"]
+
+[[durable_objects.bindings]]
+name = "POLLER"
+class_name = "PollerDO"
