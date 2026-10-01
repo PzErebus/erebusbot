@@ -61,8 +61,55 @@ const ADMIN_KB = {
   )
 };
 
+/**
+ * 数据库实例与初始化状态提升到模块级（按 env 缓存）。
+ *
+ * 原因：`createBot()` 每次请求都会调用，而 `OptimizedDatabase.initialized` 是实例字段，
+ * 若 db 与初始化标记留在 createBot 的闭包里，就等于每次请求都新建实例、
+ * 再重跑一遍建表 DDL —— 13 条 `CREATE TABLE IF NOT EXISTS` + 8 条 `CREATE INDEX`
+ * + 5 条 `ALTER TABLE` 试探，实测固定多花 ~0.7s，是交互延迟的大头。
+ * 提到模块级后，DDL 每个 isolate 只跑一次。
+ */
+interface DbEntry {
+  db: OptimizedDatabase;
+  initPromise: Promise<void> | null;
+  /** 完成后必须保持为 true——若把 initPromise 置回 null，下一个请求会再跑一遍建表 DDL */
+  initialized: boolean;
+}
+
+const dbRegistry = new WeakMap<Env, DbEntry>();
+
+function acquireDb(env: Env): DbEntry {
+  let entry = dbRegistry.get(env);
+  if (!entry) {
+    entry = { db: createDb(env), initPromise: null, initialized: false };
+    dbRegistry.set(env, entry);
+  }
+  return entry;
+}
+
+function getDb(env: Env): OptimizedDatabase {
+  return acquireDb(env).db;
+}
+
+async function ensureDbInitialized(env: Env): Promise<void> {
+  const entry = acquireDb(env);
+  if (entry.initPromise) {
+    await entry.initPromise;
+    return;
+  }
+  if (entry.initialized) return;
+  entry.initialized = true;
+  entry.initPromise = entry.db.init().catch((err) => {
+    // 失败要放开标记，否则整条 isolate 内后续请求都不再重试初始化
+    entry.initialized = false;
+    log.error('Database init error', { error: err });
+  });
+  await entry.initPromise;
+}
+
 export function createBot(env: Env) {
-  const db = createDb(env);
+  const db = getDb(env);
   const ADMIN_IDS = new Set<number>(
     (env.ADMIN_USER_ID || '').split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n))
   );
@@ -78,22 +125,6 @@ export function createBot(env: Env) {
 
   function getPrimaryAdminId(): number {
     return ADMIN_IDS.values().next().value || 0;
-  }
-
-  let dbInitialized = false;
-
-  async function initDb() {
-    if (dbInitialized) return;
-    try {
-      await db.init();
-      dbInitialized = true;
-    } catch (err) {
-      log.error('Database init error', { error: err });
-    }
-  }
-
-  async function ensureDbInitialized() {
-    if (!dbInitialized) await initDb();
   }
 
   interface PendingMessage {
@@ -170,6 +201,13 @@ export function createBot(env: Env) {
 
   async function api<T = unknown>(method: string, body: Record<string, unknown>, token?: string, retries = 3): Promise<T | null> {
     const botToken = token || TOKEN;
+    const startedAt = Date.now();
+    // 单次 Telegram 往返超过 300ms 记一条：判断「点击按钮慢」卡在 Telegram 还是本地的必要埋点
+    const done = <R>(result: R): R => {
+      const durationMs = Date.now() - startedAt;
+      if (durationMs >= 300) log.info('Telegram API slow', { method, durationMs });
+      return result;
+    };
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         const r = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
@@ -188,23 +226,23 @@ export function createBot(env: Env) {
         if (!d.ok) {
           if (d.error_code && d.error_code >= 400 && d.error_code < 500 && d.error_code !== 429) {
             log.error('API client error', { method, code: d.error_code, description: d.description });
-            return null;
+            return done(null);
           }
           log.error('API error on retry', { method, attempt, retries, description: d.description });
           if (attempt < retries) {
             await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt), 8000)));
             continue;
           }
-          return null;
+          return done(null);
         }
-        return d.result || null;
+        return done(d.result || null);
       } catch (e) {
         log.error('API exception on retry', { method, attempt, retries, error: e });
         if (attempt < retries) {
           await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, attempt), 8000)));
           continue;
         }
-        return null;
+        return done(null);
       }
     }
     return null;
@@ -1818,7 +1856,7 @@ export function createBot(env: Env) {
         const userId = msg.from!.id;
         const text = msg.text?.trim() || '';
 
-        await ensureDbInitialized();
+        await ensureDbInitialized(env);
 
         if (isAdmin(userId)) {
           if (text === '/start' || text === '/menu') {
@@ -1855,7 +1893,7 @@ export function createBot(env: Env) {
   // 用途：Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
   // 此时改用 getUpdates 轮询，彻底绕开「必须有域名」的限制。
   async function handlePoll(timeoutSeconds = 10): Promise<{ fetched: number; skipped?: boolean }> {
-    await ensureDbInitialized();
+    await ensureDbInitialized(env);
 
     const lastOffset = parseInt((await db.getSetting(POLL_OFFSET_KEY)) || '0', 10) || 0;
     let fetched = 0;

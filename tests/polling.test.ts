@@ -279,7 +279,9 @@ describe('PollerDO 闹钟轮询器', () => {
     const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
     await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
 
-    expect(fake.setAt).toHaveLength(1);
+    // 现在一个周期会先排一次、结束再排一次，两次值必须完全相同（都锚在本轮起点）
+    expect(fake.setAt.length).toBeGreaterThan(0);
+    expect(new Set(fake.setAt).size).toBe(1);
     expect(fake.setAt[0]!).toBeGreaterThan(Date.now());
     expect(state.updateSettingCalls).toContainEqual([OFF_KEY, '9002']);
   });
@@ -292,7 +294,8 @@ describe('PollerDO 闹钟轮询器', () => {
     const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
     await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
 
-    expect(fake.setAt).toHaveLength(1);
+    expect(fake.setAt.length).toBeGreaterThan(0);
+    expect(new Set(fake.setAt).size).toBe(1);
   });
 
   it('下一轮闹钟按「本轮起点」排，长轮询耗时不会累加进周期', async () => {
@@ -340,5 +343,44 @@ describe('PollerDO 闹钟轮询器', () => {
 
     expect(body.rescheduled).toBe(false);
     expect(fake.alarmTick()).toBe(soon);
+  });
+});
+
+describe('PollerDO 连续长轮询覆盖', () => {
+  it('一个周期内会连开多次长连接消除盲窗，且次数受上限约束不会空转', async () => {
+    const { PollerDO, DEFAULT_POLL_INTERVAL_MS } = await import('../src/poller');
+    const MAX_ROUNDS = 3; // 与 src/poller.ts 的 MAX_ROUNDS_PER_CYCLE 保持一致
+    const fake = { setAt: [] as number[], ctx: {
+      storage: {
+        getAlarm: async () => null,
+        setAlarm: async (v: number) => { fake.setAt.push(v); },
+        get: async () => undefined,
+        put: async () => {}
+      },
+      blockConcurrencyWhile: async (fn: () => Promise<void>) => { await fn(); }
+    } as unknown as DurableObjectState };
+
+    state.updates = [];
+    const origFetch = globalThis.fetch;
+    let getUpdatesCalls = 0;
+    vi.stubGlobal('fetch', async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('getUpdates')) {
+        getUpdatesCalls++;
+        return { ok: true, status: 200, json: async () => ({ ok: true, result: [] }) } as Response;
+      }
+      return origFetch(input, init);
+    });
+
+    const doInstance = new PollerDO(fake.ctx, makeEnv() as never);
+    const t0 = Date.now();
+    await (doInstance as unknown as { alarm(): Promise<void> }).alarm();
+    globalThis.fetch = origFetch;
+
+    // 每轮返回得再快，也必须退出：既不能空转到下一个闹钟周期，也不能无限撞连接
+    expect(getUpdatesCalls).toBeLessThanOrEqual(MAX_ROUNDS);
+    expect(getUpdatesCalls).toBeGreaterThanOrEqual(1);
+    expect(Date.now() - t0).toBeLessThan(DEFAULT_POLL_INTERVAL_MS / 1000);
+    expect(new Set(fake.setAt).size).toBe(1);
   });
 });
