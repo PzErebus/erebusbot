@@ -4,6 +4,18 @@ compatibility_date = "2025-01-01"
 # 必须显式开启，否则 wrangler triggers deploy 会默认关掉 workers.dev 路由
 workers_dev = true
 
+# 自定义域名路由（需 wrangler triggers deploy 应用）
+# 目的：Telegram 拒绝把 webhook 指向 *.workers.dev，必须走自有域名
+# 注意：bot.erebus.de5.net 已被另一个「智能反代」站点占用，此处不能用
+# DNS 侧已由 Cloudflare 建好 *.erebusbot.erebus.de5.net -> Worker erebusbot，
+# 但仅有 DNS 记录不会路由，必须在此声明 Route，否则请求落到 CDN 返回 404 Node not found。
+# 显式声明精确主机 + 通配子域两条，避免 Cloudflare 对 `*.host` 是否匹配 `host` 的差异。
+# 注意：routes 是顶层键，必须放在任何 [[table]] 头之前，否则会被归进上一个表（如 d1_databases）而被忽略。
+routes = [
+  { pattern = "erebusbot.erebus.de5.net/*", zone_name = "erebus.de5.net" },
+  { pattern = "*.erebusbot.erebus.de5.net/*", zone_name = "erebus.de5.net" }
+]
+
 [vars]
 LANGUAGE = "zh_CN"
 # 轮询间隔（毫秒），5s~60s。DO alarm 精度到秒级；周期已收敛为 interval 本身（不再叠加长轮询耗时），
@@ -21,17 +33,6 @@ POLL_INTERVAL_MS = 10000
 binding = "BOT_D1"
 database_name = "cf-pm-bot"
 database_id = "e91a400b-f65a-4643-90e4-02fb3558551b"
-
-# 自定义域名路由（需 wrangler triggers deploy 应用）
-# 目的：Telegram 拒绝把 webhook 指向 *.workers.dev，必须走自有域名
-# 注意：bot.erebus.de5.net 已被另一个「智能反代」站点占用，此处不能用
-# DNS 侧已由 Cloudflare 建好 *.erebusbot.erebus.de5.net -> Worker erebusbot，
-# 但仅有 DNS 记录不会路由，必须在此声明 Route，否则请求落到 CDN 返回 404 Node not found。
-# 显式声明精确主机 + 通配子域两条，避免 Cloudflare 对 `*.host` 是否匹配 `host` 的差异。
-routes = [
-  { pattern = "erebusbot.erebus.de5.net/*", zone_name = "erebus.de5.net" },
-  { pattern = "*.erebusbot.erebus.de5.net/*", zone_name = "erebus.de5.net" }
-]
 
 # 轮询触发器（替代 webhook）
 # Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
