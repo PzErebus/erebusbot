@@ -443,6 +443,29 @@ export class OptimizedDatabase {
     this.cache.delete('auto_replies');
   }
 
+  /** 单条查询：详情面板用，替代「拉全表再 find」 */
+  async getAutoReply(id: number): Promise<{ id: number; keyword: string; reply_text: string; match_type: string; is_enabled: number } | null> {
+    return await this.safeExecute('getAutoReply', async () => {
+      const r = await this.db.prepare('SELECT id, keyword, reply_text, match_type, is_enabled FROM pm_auto_replies WHERE id = ?').bind(id).first();
+      return (r as { id: number; keyword: string; reply_text: string; match_type: string; is_enabled: number } | null) || null;
+    }) ?? null;
+  }
+
+  /**
+   * 原子翻转启用状态：单条 SQL 完成「读当前值 + 取反 + 写回」，
+   * 替代原先 handler 里 getAutoReplies() 全表 → find → toggleAutoReply() 的三步，
+   * 消除两次读之间的竞态（两个管理员同时点开关时旧版会互相覆盖）。
+   * 返回翻转后的状态；记录不存在返回 null。
+   */
+  async flipAutoReply(id: number): Promise<boolean | null> {
+    const result = await this.safeExecute('flipAutoReply', async () => {
+      const r = await this.db.prepare('UPDATE pm_auto_replies SET is_enabled = 1 - is_enabled WHERE id = ? RETURNING is_enabled').bind(id).first<{ is_enabled: number }>();
+      return r ? r.is_enabled === 1 : null;
+    });
+    this.cache.delete('auto_replies');
+    return result ?? null;
+  }
+
   async checkAutoReply(message: string): Promise<string | null> {
     try {
       const replies = await this.getAutoReplies();
@@ -544,6 +567,25 @@ export class OptimizedDatabase {
     });
     this.cache.delete('blacklist');
     this.cache.delete('blacklist:enabled');
+  }
+
+  /** 单条查询：详情面板用，替代「拉全表再 find」 */
+  async getBlacklistKeyword(id: number): Promise<{ id: number; keyword: string; is_regex: number; is_enabled: number; reason: string | null } | null> {
+    return await this.safeExecute('getBlacklistKeyword', async () => {
+      const r = await this.db.prepare('SELECT id, keyword, is_regex, is_enabled, reason FROM pm_blacklist_keywords WHERE id = ?').bind(id).first();
+      return (r as { id: number; keyword: string; is_regex: number; is_enabled: number; reason: string | null } | null) || null;
+    }) ?? null;
+  }
+
+  /** 原子翻转启用状态（同 flipAutoReply），返回翻转后的状态；记录不存在返回 null */
+  async flipBlacklistKeyword(id: number): Promise<boolean | null> {
+    const result = await this.safeExecute('flipBlacklistKeyword', async () => {
+      const r = await this.db.prepare('UPDATE pm_blacklist_keywords SET is_enabled = 1 - is_enabled WHERE id = ? RETURNING is_enabled').bind(id).first<{ is_enabled: number }>();
+      return r ? r.is_enabled === 1 : null;
+    });
+    this.cache.delete('blacklist');
+    this.cache.delete('blacklist:enabled');
+    return result ?? null;
   }
 
   async toggleBlacklistKeyword(id: number, isEnabled: boolean): Promise<void> {
@@ -784,6 +826,14 @@ export class OptimizedDatabase {
       await this.db.prepare('DELETE FROM pm_quick_replies WHERE id = ?').bind(id).run();
     });
     this.cache.delete('quick_replies');
+  }
+
+  /** 单条查询：使用快捷回复时替代「拉全表再 find」 */
+  async getQuickReply(id: number): Promise<{ id: number; title: string; content: string; category: string } | null> {
+    return await this.safeExecute('getQuickReply', async () => {
+      const r = await this.db.prepare('SELECT id, title, content, category FROM pm_quick_replies WHERE id = ?').bind(id).first();
+      return (r as { id: number; title: string; content: string; category: string } | null) || null;
+    }) ?? null;
   }
 
   // ============ Scheduled Messages ============

@@ -11,7 +11,9 @@ import { createLogger } from './logger';
 
 const log = createLogger('api');
 
-const VERSION = '202605182048';
+// 版本号单一来源：bot.ts 的 help 面板也引用它
+import { BOT_VERSION as VERSION } from './bot';
+export { VERSION };
 const apiCache = new MemoryCache(60);
 
 // 轮询的实际执行器（互斥锁也在这里）：Cron 与手动触发 /cron/poll 共用
