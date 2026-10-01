@@ -1,6 +1,8 @@
 name = "erebusbot"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
+# 必须显式开启，否则 wrangler triggers deploy 会默认关掉 workers.dev 路由
+workers_dev = true
 
 [vars]
 LANGUAGE = "zh_CN"
@@ -15,3 +17,10 @@ LANGUAGE = "zh_CN"
 binding = "BOT_D1"
 database_name = "cf-pm-bot"
 database_id = "e91a400b-f65a-4643-90e4-02fb3558551b"
+
+# 自定义域名路由（需 wrangler triggers deploy 应用）
+# 目的：Telegram 拒绝把 webhook 指向 *.workers.dev，必须走自有域名
+# 注意：bot.erebus.de5.net 已被另一个「智能反代」站点占用，此处不能用
+routes = [
+  { pattern = "pm.erebus.de5.net/*", zone_name = "erebus.de5.net" }
+]
