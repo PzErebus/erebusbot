@@ -29,10 +29,12 @@ POLL_INTERVAL_MS = 10000
 # SILICONFLOW_API_KEY - SiliconFlow API 密钥（用于AI广告检测）
 
 # D1 数据库配置
+# 2026-10-01 迁移：旧库 cf-pm-bot 主库在美西 SJC（每查询 ~200ms 跨洋 RTT），
+# 新库建在 APAC（主库 SIN 新加坡），单查询 RTT 降到 ~20ms。旧库保留用于回滚。
 [[d1_databases]]
 binding = "BOT_D1"
-database_name = "cf-pm-bot"
-database_id = "e91a400b-f65a-4643-90e4-02fb3558551b"
+database_name = "cf-pm-bot-apac"
+database_id = "194f44ec-9a65-4fd0-bd11-dd1815229a58"
 
 # 轮询触发器（替代 webhook）
 # Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
