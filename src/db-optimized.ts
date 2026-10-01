@@ -34,8 +34,13 @@ export class OptimizedDatabase {
   }
 
   private async safeExecute<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now();
     try {
-      return await fn();
+      const result = await fn();
+      // D1 主库可能在海外（本库在 SJC），单查询 ≥300ms 记一条，用于判断「面板慢」卡在哪
+      const durationMs = Date.now() - startedAt;
+      if (durationMs >= 300) log.warn('D1 slow query', { operation, durationMs });
+      return result;
     } catch (e) {
       const errorMsg = String(e);
       if (errorMsg.includes('no such table') ||
@@ -47,6 +52,45 @@ export class OptimizedDatabase {
       log.error('Operation failed', { operation, error: e });
       throw e;
     }
+  }
+
+  // ============ Stale-While-Revalidate 统计缓存 ============
+  // D1 主库跨洋（~200ms/查询），统计类查询如果每次点击都阻塞重查，
+  // 主页/admin 面板永远比其他面板多两个 RTT。改为：缓存过期时先返回旧值、
+  // 后台刷新；只有真实写操作（新消息/已读/封禁）才主动失效并强制阻塞刷新。
+  private staleStats = new Map<string, { value: unknown }>();
+  private swrInflight = new Map<string, Promise<void>>();
+
+  /** 失效 = 缓存 + 旧值一起清，下次调用走阻塞刷新拿到新数据 */
+  private invalidate(key: string): void {
+    this.cache.delete(key);
+    this.staleStats.delete(key);
+  }
+
+  private async swr<T>(key: string, ttl: number, operation: string, fn: () => Promise<T>): Promise<T> {
+    const cached = this.cache.get<T>(key);
+    if (cached !== undefined) return cached;
+
+    const stale = this.staleStats.get(key);
+    if (stale !== undefined) {
+      // 有旧值可兜底：后台刷新（去重），本次立即返回旧值
+      if (!this.swrInflight.has(key)) {
+        const refresh = this.safeExecute(operation, fn)
+          .then(v => {
+            this.cache.set(key, v, ttl);
+            this.staleStats.set(key, { value: v });
+          })
+          .catch(() => {})
+          .finally(() => { this.swrInflight.delete(key); });
+        this.swrInflight.set(key, refresh);
+      }
+      return stale.value as T;
+    }
+
+    const result = await this.safeExecute(operation, fn);
+    this.cache.set(key, result, ttl);
+    this.staleStats.set(key, { value: result });
+    return result;
   }
 
   private async ensureInit(): Promise<void> {
@@ -216,7 +260,7 @@ export class OptimizedDatabase {
     });
     this.cache.set(`blocked:${userId}`, true, 60);
     this.cache.delete('blocked_users');
-    this.cache.delete('stats:pm');
+    this.invalidate('stats:pm');
   }
 
   async unblockPmUser(userId: number): Promise<void> {
@@ -225,7 +269,7 @@ export class OptimizedDatabase {
     });
     this.cache.set(`blocked:${userId}`, false, 60);
     this.cache.delete('blocked_users');
-    this.cache.delete('stats:pm');
+    this.invalidate('stats:pm');
   }
 
   async getPmUser(userId: number): Promise<{
@@ -360,10 +404,7 @@ export class OptimizedDatabase {
 
   // ============ Stats ============
   async getPmStats(): Promise<{ totalUsers: number; totalMessages: number; todayMessages: number; blockedUsers: number }> {
-    const cached = this.cache.get<{ totalUsers: number; totalMessages: number; todayMessages: number; blockedUsers: number }>('stats:pm');
-    if (cached !== undefined) return cached;
-
-    const result = await this.safeExecute('getPmStats', async () => {
+    return this.swr('stats:pm', 60, 'getPmStats', async () => {
       const r = await this.db.prepare(`
         SELECT
           (SELECT COUNT(*) FROM pm_users) as totalUsers,
@@ -384,8 +425,6 @@ export class OptimizedDatabase {
         blockedUsers: r?.blockedUsers || 0,
       };
     });
-    this.cache.set('stats:pm', result, 60);
-    return result;
   }
 
   // ============ Auto Replies with Cache ============
@@ -678,9 +717,9 @@ export class OptimizedDatabase {
       return r.meta?.last_row_id || 0;
     });
     if (direction === 'in') {
-      this.cache.delete('stats:unread');
+      this.invalidate('stats:unread');
     }
-    this.cache.delete('stats:pm');
+    this.invalidate('stats:pm');
     return result;
   }
 
@@ -706,29 +745,24 @@ export class OptimizedDatabase {
   }
 
   async getUnreadMessageCount(): Promise<number> {
-    const cached = this.cache.get<number>('stats:unread');
-    if (cached !== undefined) return cached;
-
-    const result = await this.safeExecute('getUnreadMessageCount', async () => {
+    return this.swr('stats:unread', 60, 'getUnreadMessageCount', async () => {
       const r = await this.db.prepare('SELECT COUNT(*) as count FROM pm_messages WHERE direction = \'in\' AND is_read = 0').first<{ count: number }>();
       return r?.count || 0;
     });
-    this.cache.set('stats:unread', result, 30);
-    return result;
   }
 
   async markMessagesAsRead(userId: number): Promise<void> {
     await this.safeExecute('markMessagesAsRead', async () => {
       await this.db.prepare('UPDATE pm_messages SET is_read = 1 WHERE user_id = ? AND direction = \'in\' AND is_read = 0').bind(userId).run();
     });
-    this.cache.delete('stats:unread');
+    this.invalidate('stats:unread');
   }
 
   async markAllMessagesAsRead(): Promise<void> {
     await this.safeExecute('markAllMessagesAsRead', async () => {
       await this.db.prepare('UPDATE pm_messages SET is_read = 1 WHERE direction = \'in\' AND is_read = 0').run();
     });
-    this.cache.delete('stats:unread');
+    this.invalidate('stats:unread');
   }
 
   async getUnreadMessages(limit: number = 20): Promise<Array<{
