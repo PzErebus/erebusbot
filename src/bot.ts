@@ -13,9 +13,11 @@ const updateDeduplication = new Set<number>();
 const MAX_DEDUP_SIZE = 10000;
 /** 轮询模式下已消费到的 Telegram update_id（+1 存），落 pm_settings 表 */
 const POLL_OFFSET_KEY = 'tg_poll_offset';
+/** 收发模式开关：'webhook' = Telegram 主动推送（轮询让位）；空/其他 = getUpdates 轮询 */
+const POLL_MODE_KEY = 'poll_mode';
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610012315';
+export const BOT_VERSION = '202610020001';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -2085,8 +2087,16 @@ export function createBot(env: Env) {
   // ============ Polling Mode ============
   // 用途：Telegram 不接受解析到 198.18.0.0/15（CF 保留 anycast 段）的 webhook 地址，
   // 此时改用 getUpdates 轮询，彻底绕开「必须有域名」的限制。
+  // 2026-10-01：已有自定义域名，切换为 Webhook 推送模式（Telegram 主动推送，零拾取延迟）。
+  // 轮询保留为回滚备份：把 pm_settings.poll_mode 改回非 'webhook'（或删掉该行）并 deleteWebhook 即可恢复。
   async function handlePoll(timeoutSeconds = 10): Promise<{ fetched: number; skipped?: boolean }> {
     await ensureDbInitialized(env);
+
+    // Webhook 模式下轮询让位：继续 getUpdates 只会撞 409 空转。
+    // getSetting 有 300s 缓存，切换后最多多跑 5 分钟空轮询属预期。
+    if ((await db.getSetting(POLL_MODE_KEY)) === 'webhook') {
+      return { fetched: 0, skipped: true };
+    }
 
     const lastOffset = parseInt((await db.getSetting(POLL_OFFSET_KEY)) || '0', 10) || 0;
     let fetched = 0;
