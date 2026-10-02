@@ -81,7 +81,7 @@ export function resetAntiSpamState(): void {
 }
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610021015';
+export const BOT_VERSION = '202610021255';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -1086,7 +1086,7 @@ export function createBot(env: Env) {
       }
       const pendingCount = getPendingMessageCount();
 
-      const text = head('🛠 管理中心', 'ErebusBot 私聊中继') +
+      const text = head('🛠 管理中心', 'ErebusBot') +
         `\n\n👥 用户 <b>${stats.totalUsers}</b> · 📨 待处理 <b>${pendingCount}</b>` +
         `\n🔔 未读 <b>${unreadCount}</b> · 🚫 封禁 <b>${stats.blockedUsers}</b>` +
         `\n🟢 系统运行正常 · v${BOT_VERSION}` +
