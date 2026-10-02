@@ -53,7 +53,7 @@ vi.mock('../src/db-optimized', () => ({
     )
 }));
 
-import { createBot } from '../src/bot';
+import { createBot, resetAntiSpamState } from '../src/bot';
 import type { Env } from '../src/types';
 
 const ADMIN_ID = 1001;
@@ -83,6 +83,7 @@ function userMessage(updateId: number, text: string, isBot = false, isAdmin = fa
 }
 
 beforeEach(() => {
+  resetAntiSpamState();
   state.settings = {};
   state.updateSettingCalls = [];
   state.saveMessageCalls = 0;

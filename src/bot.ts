@@ -16,8 +16,72 @@ const POLL_OFFSET_KEY = 'tg_poll_offset';
 /** 收发模式开关：'webhook' = Telegram 主动推送（轮询让位）；空/其他 = getUpdates 轮询 */
 const POLL_MODE_KEY = 'poll_mode';
 
+// ============ 反垃圾：滑动窗口限流 + 广告特征识别 ============
+/** 统计窗口与阈值（模块级常量，Bot 侧所有 isolate 共用同一套规则） */
+const RATE_WINDOW_MS = 10_000;
+const RATE_MAX_MSGS = 5;
+/** 管理员告警节流：同一用户 10 分钟内最多提醒一次，防刷屏式告警 */
+const SPAM_NOTIFY_COOLDOWN_MS = 10 * 60_000;
+
+/** 每用户消息时间戳滑动窗口（内存态，isolate 回收重置可接受——只影响窗口起点） */
+const rateWindows = new Map<number, number[]>();
+/** 每用户累计超限次数 */
+const rateViolations = new Map<number, number>();
+/** 每用户上次管理员告警时间 */
+const spamNotifyAt = new Map<number, number>();
+
+/**
+ * 滑动窗口限流检查。
+ * 返回 allowed=false 时消息应被静默拦截（不回复用户，避免给刷屏者喂反馈）。
+ * （export 仅为测试可达）
+ */
+export function checkRateLimit(userId: number, now = Date.now()): { allowed: boolean; violations: number } {
+  let stamps = rateWindows.get(userId);
+  if (!stamps) {
+    stamps = [];
+    rateWindows.set(userId, stamps);
+  }
+  while (stamps.length > 0 && now - stamps[0] > RATE_WINDOW_MS) stamps.shift();
+  if (stamps.length >= RATE_MAX_MSGS) {
+    const violations = (rateViolations.get(userId) || 0) + 1;
+    rateViolations.set(userId, violations);
+    return { allowed: false, violations };
+  }
+  stamps.push(now);
+  return { allowed: true, violations: rateViolations.get(userId) || 0 };
+}
+
+/** 广告特征规则：命中任意一条即判定为广告。宁可少杀，误报可控为先。 */
+const AD_PATTERNS: Array<{ re: RegExp; label: string }> = [
+  { re: /博彩|赌博|赌场|六合彩|时时彩|澳门在线|网投|下注|返水/i, label: '博彩' },
+  { re: /刷单|兼职群|点赞刷量|涨粉|代刷|引流推广|接单平台/i, label: '刷量兼职' },
+  { re: /招代理|代理加盟|招募合伙人|一条龙服务|专业代开|代开发票/i, label: '招代理' },
+  { re: /免费领|免费领取|扫码领取|红包码|优惠码|口令红包|现金红包/i, label: '诱导领取' },
+  { re: /贷款|空放|私借|下款|额度秒批|无视征信/i, label: '贷款' },
+  { re: /微信[\s:：]*(购买|出售|出收)|出微信|收微信|买号|卖号/i, label: '账号交易' },
+  { re: /(?:加|联系|搜)(?:我)?(?:微信|vx|VX|V信|威信|扣扣|QQ)(?![a-z])/i, label: '引流联系方式' },
+  { re: /(?:qq|扣扣|Q群|群)\s*[:：]?\s*\d{5,12}\b/i, label: 'QQ号引流' },
+  { re: /t\.me\/\+?[A-Za-z0-9_]{5,}|telegram\.me\/\+?[A-Za-z0-9_]{5,}|joinchat/i, label: '拉群外链' },
+  { re: /(.)\1{12,}/, label: '字符刷屏' },
+];
+
+/** 广告判定：返回命中的规则标签，未命中返回 null（export 仅为测试可达） */
+export function matchAd(text: string): string | null {
+  for (const { re, label } of AD_PATTERNS) {
+    if (re.test(text)) return label;
+  }
+  return null;
+}
+
+/** 清空反垃圾内存状态（测试隔离用；生产环境无需调用） */
+export function resetAntiSpamState(): void {
+  rateWindows.clear();
+  rateViolations.clear();
+  spamNotifyAt.clear();
+}
+
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610020001';
+export const BOT_VERSION = '202610020922';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -411,6 +475,38 @@ export function createBot(env: Env) {
     return lines.map(([fmt, example]) => `请按以下格式输入：\n<code>${fmt}</code>\n\n示例:\n<code>${example}</code>`).join('\n\n');
   }
 
+  /**
+   * 垃圾消息违规处理：审计落库 + 节流告警管理员（附封禁快捷按钮）。
+   * 频率超限对用户完全静默；广告命中回复与黑名单一致的提示语，不暴露拦截原因。
+   */
+  async function handleSpamViolation(
+    user: NonNullable<TelegramMessage['from']>,
+    kind: 'rate' | 'ad',
+    violations: number,
+    adLabel?: string
+  ): Promise<void> {
+    const reason = kind === 'rate' ? `刷屏（10秒内超${RATE_MAX_MSGS}条，累计超限${violations}次）` : `广告特征：${adLabel}`;
+    // 审计与告警都不阻塞主流程
+    fire(db.addAuditLog(user.id, 'spam_blocked', 'user', String(user.id), reason));
+    const now = Date.now();
+    if (now - (spamNotifyAt.get(user.id) || 0) > SPAM_NOTIFY_COOLDOWN_MS) {
+      spamNotifyAt.set(user.id, now);
+      const total = rateViolations.get(user.id) || 0;
+      const adminId = getPrimaryAdminId();
+      if (!adminId) return;
+      await sendMsg(adminId,
+        `🛡️ <b>垃圾消息已拦截</b>\n\n` +
+        `👤 ${escapeHtml(getUserName(user))}  <code>${user.id}</code>\n` +
+        `📌 原因：${escapeHtml(reason)}\n` +
+        `📊 该用户累计超限：${total} 次`,
+        { reply_markup: mk([
+          { text: '🚫 封禁', callback_data: `ban_pm_${user.id}` },
+          { text: '👥 详情', callback_data: `pm_user_${user.id}` }
+        ]) }
+      ).catch(e => log.error('Spam notify failed', { error: e }));
+    }
+  }
+
   // ============ User Message Handler ============
   async function handleUserMessage(msg: TelegramMessage): Promise<void> {
     const user = msg.from!;
@@ -464,6 +560,21 @@ export function createBot(env: Env) {
       ]);
 
       if (blacklistResult.matched) {
+        await sendMsg(chatId, '⚠️ 您的消息包含敏感内容，无法发送。');
+        return;
+      }
+
+      // 反垃圾第一道：滑动窗口限流——超限静默拦截，不回复（回复只会给刷屏者喂反馈）
+      const rate = checkRateLimit(user.id);
+      if (!rate.allowed) {
+        await handleSpamViolation(user, 'rate', rate.violations);
+        return;
+      }
+
+      // 反垃圾第二道：广告特征识别——提示语与黑名单一致，不暴露具体拦截原因
+      const adLabel = matchAd(text);
+      if (adLabel) {
+        await handleSpamViolation(user, 'ad', 0, adLabel);
         await sendMsg(chatId, '⚠️ 您的消息包含敏感内容，无法发送。');
         return;
       }
@@ -1560,31 +1671,36 @@ export function createBot(env: Env) {
     }
   }
 
-  async function showQuickReplies(chatId: number, messageId?: number): Promise<void> {
+  async function showQuickReplies(chatId: number, messageId?: number, page = 0): Promise<void> {
     try {
       const replies = await db.getQuickReplies();
-      let text = head('⚡ 快捷回复', `共 ${replies.length} 条`);
+      const { rows: pageReplies, hasMore, totalPages } = pageSlice(replies, page);
+      const start = page * PAGE_SIZE;
+      let text = head('⚡ 快捷回复', `共 ${replies.length} 条 · ${page + 1}/${totalPages}`);
       if (replies.length === 0) {
         text += `\n\n<i>暂无快捷回复，点击下方「添加」创建</i>`;
       } else {
-        for (let i = 0; i < Math.min(replies.length, 10); i++) {
-          const r = replies[i];
-          text += `\n${i + 1}. ⚡ <b>${escapeHtml(r.title)}</b>\n   ${escapeHtml(trunc(r.content, 35))}`;
+        for (let i = 0; i < pageReplies.length; i++) {
+          const r = pageReplies[i];
+          text += `\n${start + i + 1}. ⚡ <b>${escapeHtml(r.title)}</b>\n   ${escapeHtml(trunc(r.content, 35))}`;
         }
       }
 
       const keyboard: KbRow[] = [];
-      for (const r of replies.slice(0, 5)) {
+      for (const r of pageReplies) {
         keyboard.push([
           { text: `⚡ ${trunc(r.title, 12)}`, callback_data: `use_quick_${r.id}` },
           { text: '🗑️', callback_data: `delete_quick_${r.id}` }
         ]);
       }
       keyboard.push([{ text: '➕ 添加', callback_data: 'add_quick_reply' }]);
+      const nav = navRow('quick_replies_page_', page, hasMore);
+      if (nav) keyboard.push(nav);
       keyboard.push([{ text: '🔙 回复管理', callback_data: 'reply_mgmt' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
 
       await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
+      log.error('Error showing quick replies', { error: e });
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
     }
   }
@@ -1772,6 +1888,7 @@ export function createBot(env: Env) {
       await editOrSend(ctx.chatId, '✅ 已忽略该消息', { reply_markup: mk([{ text: '◀ 返回待处理', callback_data: 'pending_messages' }]) }, ctx.msgId);
     }},
     { prefix: 'auto_replies_', handler: async (ctx) => { await showAutoReplies(ctx.chatId, cbNum(ctx.data, 2), ctx.msgId); } },
+    { prefix: 'quick_replies_page_', handler: async (ctx) => { await showQuickReplies(ctx.chatId, ctx.msgId, cbNum(ctx.data, 2)); } },
     { prefix: 'blacklist_page_', handler: async (ctx) => { await showBlacklistKeywords(ctx.chatId, cbNum(ctx.data, 2), ctx.msgId); } },
     { prefix: 'auto_reply_', handler: async (ctx) => {
       const replyId = cbNum(ctx.data, 2);
