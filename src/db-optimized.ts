@@ -692,8 +692,13 @@ export class OptimizedDatabase {
     const setting = await this.getWorkHoursSetting();
     if (!setting || !setting.enabled) return true;
 
-    const now = new Date();
-    const currentHour = now.getHours();
+    // 关键：Workers 环境里 new Date().getHours() 返回 UTC 小时，
+    // 而面板显示与用户预期都是北京时间——这里必须同样取 Asia/Shanghai，
+    // 否则设置 9-18 实际生效的是北京时间 17:00-次日 2:00（整体偏移 8 小时）。
+    const hourStr = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai', hour: '2-digit', hour12: false
+    }).format(new Date());
+    const currentHour = parseInt(hourStr, 10) % 24;
 
     if (setting.startHour <= setting.endHour) {
       return currentHour >= setting.startHour && currentHour < setting.endHour;

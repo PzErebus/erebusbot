@@ -90,6 +90,7 @@ export class PollerDO {
 
     try {
       const { createBot } = await import('./bot');
+      const bot = createBot(this.env);
       const t0 = Date.now();
       // 连续长轮询：一轮 getUpdates 返回后立刻发下一轮。
       // 若每 interval 秒才开一次长连接，连接只覆盖前 interval-timeout 秒，
@@ -99,7 +100,7 @@ export class PollerDO {
       let rounds = 0;
       while (rounds < MAX_ROUNDS_PER_CYCLE && deadline - Date.now() > 500) {
         const remainingSec = Math.ceil((deadline - Date.now()) / 1000);
-        const r = await createBot(this.env).handlePoll(Math.min(POLL_TIMEOUT_CAP, remainingSec));
+        const r = await bot.handlePoll(Math.min(POLL_TIMEOUT_CAP, remainingSec));
         fetched += r.fetched;
         rounds++;
         // 409 / 异常时立刻退出，等下一次闹钟重来，否则会死循环式反复撞同一条连接
@@ -112,6 +113,11 @@ export class PollerDO {
         await this.ctx.storage.put('lastFetched', fetched);
         log.info('Poll finished', { source: 'do-alarm', fetched, rounds, durationMs });
       }
+
+      // 定时消息扫描：webhook 模式下 handlePoll 会 skipped 让位，但闹钟链仍每 10s 跑到这里，
+      // 定时消息的投递就挂在这一步——否则切到 webhook 后没人发送，消息永远停在 is_sent=0。
+      // DO alarm 不会并发执行，天然免疫重复发送。
+      await bot.processScheduledMessages();
     } catch (e) {
       // 失败也要续期，否则闹钟链断掉后整个 bot 静默失联
       log.error('PollerDO alarm error', { error: e });

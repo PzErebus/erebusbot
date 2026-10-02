@@ -152,12 +152,21 @@ export default {
 
     // 轮询入口：由 wrangler.toml 的 crons 每分钟触发
     // 在 Telegram 拒绝 webhook 地址（例如 Cloudflare 保留段 IP）时作为替代接收方式
+    // 鉴权：手动触发可被滥用为连接放大器，必须校验管理员凭据
     if (path === '/cron/poll' || path === '/cron/poll/') {
+      const auth = await authenticateAdminRequest(request, env);
+      if (!auth.success) {
+        return createUnauthorizedResponse(auth.error);
+      }
       return createSafeResponse(await runPoll(env, 'http'));
     }
 
-    // 轮询器状态（运维自检用：确认 DO 闹钟链还活着）
+    // 轮询器状态（运维自检用：确认 DO 闹钟链还活着）。含内部运行数据，需管理员鉴权
     if (path === '/poll-state') {
+      const auth = await authenticateAdminRequest(request, env);
+      if (!auth.success) {
+        return createUnauthorizedResponse(auth.error);
+      }
       if (!env.POLLER) {
         return createSafeResponse({ ok: false, error: 'POLLER binding missing' }, 500);
       }

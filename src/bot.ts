@@ -81,7 +81,7 @@ export function resetAntiSpamState(): void {
 }
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610020922';
+export const BOT_VERSION = '202610020940';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -266,6 +266,82 @@ async function ensureDbInitialized(env: Env): Promise<void> {
   await entry.initPromise;
 }
 
+// ============ 待处理消息与内存统计（模块级） ============
+// 关键：这两份状态绝不能放进 createBot 闭包——webhook 每个请求都会 createBot()，
+// 闭包内状态等于每个请求都清零，「待处理」永远显示 0、pm_reply 清 pending 空转。
+// 与 dbRegistry 同理提到模块级，一个 isolate 内跨请求共享。
+interface PendingMessage {
+  id: number;
+  user_id: number;
+  content: string;
+  created_at: number;
+  first_name: string | null;
+  username: string | null;
+  priority: 'normal' | 'urgent' | 'low';
+}
+const pendingMessagesCache = new MemoryCache();
+const pendingMessageIds: number[] = [];
+let pendingMessageIdCounter = 1;
+
+function addPendingMessage(msg: PendingMessage): void {
+  pendingMessagesCache.set(`pm:${msg.id}`, msg, 86400);
+  pendingMessageIds.push(msg.id);
+}
+
+function getPendingMessage(id: number): PendingMessage | undefined {
+  return pendingMessagesCache.get<PendingMessage>(`pm:${id}`);
+}
+
+function deletePendingMessage(id: number): boolean {
+  const key = `pm:${id}`;
+  const exists = pendingMessagesCache.has(key);
+  if (exists) {
+    pendingMessagesCache.delete(key);
+    const idx = pendingMessageIds.indexOf(id);
+    if (idx !== -1) pendingMessageIds.splice(idx, 1);
+  }
+  return exists;
+}
+
+function getAllPendingMessages(): PendingMessage[] {
+  const messages: PendingMessage[] = [];
+  const now = Date.now();
+  for (const id of pendingMessageIds) {
+    const msg = pendingMessagesCache.get<PendingMessage>(`pm:${id}`);
+    if (msg && now <= msg.created_at + 86400 * 1000) {
+      messages.push(msg);
+    }
+  }
+  return messages;
+}
+
+function getPendingMessageCount(): number {
+  return pendingMessageIds.length;
+}
+
+const messageStats = {
+  totalMessages: 0,
+  todayMessages: 0,
+  todayActiveUsers: new Set<number>(),
+  lastResetDate: new Date().toDateString()
+};
+
+function resetDailyStatsIfNeeded() {
+  const today = new Date().toDateString();
+  if (messageStats.lastResetDate !== today) {
+    messageStats.todayMessages = 0;
+    messageStats.todayActiveUsers.clear();
+    messageStats.lastResetDate = today;
+  }
+}
+
+function recordMessageStat(userId: number) {
+  resetDailyStatsIfNeeded();
+  messageStats.totalMessages++;
+  messageStats.todayMessages++;
+  messageStats.todayActiveUsers.add(userId);
+}
+
 export function createBot(env: Env) {
   const db = getDb(env);
   const ADMIN_IDS = new Set<number>(
@@ -283,78 +359,6 @@ export function createBot(env: Env) {
 
   function getPrimaryAdminId(): number {
     return ADMIN_IDS.values().next().value || 0;
-  }
-
-  interface PendingMessage {
-    id: number;
-    user_id: number;
-    content: string;
-    created_at: number;
-    first_name: string | null;
-    username: string | null;
-    priority: 'normal' | 'urgent' | 'low';
-  }
-  const pendingMessagesCache = new MemoryCache();
-  const pendingMessageIds: number[] = [];
-  let pendingMessageIdCounter = 1;
-
-  function addPendingMessage(msg: PendingMessage): void {
-    pendingMessagesCache.set(`pm:${msg.id}`, msg, 86400);
-    pendingMessageIds.push(msg.id);
-  }
-
-  function getPendingMessage(id: number): PendingMessage | undefined {
-    return pendingMessagesCache.get<PendingMessage>(`pm:${id}`);
-  }
-
-  function deletePendingMessage(id: number): boolean {
-    const key = `pm:${id}`;
-    const exists = pendingMessagesCache.has(key);
-    if (exists) {
-      pendingMessagesCache.delete(key);
-      const idx = pendingMessageIds.indexOf(id);
-      if (idx !== -1) pendingMessageIds.splice(idx, 1);
-    }
-    return exists;
-  }
-
-  function getAllPendingMessages(): PendingMessage[] {
-    const messages: PendingMessage[] = [];
-    const now = Date.now();
-    for (const id of pendingMessageIds) {
-      const msg = pendingMessagesCache.get<PendingMessage>(`pm:${id}`);
-      if (msg && now <= msg.created_at + 86400 * 1000) {
-        messages.push(msg);
-      }
-    }
-    return messages;
-  }
-
-  function getPendingMessageCount(): number {
-    return pendingMessageIds.length;
-  }
-
-  const messageStats = {
-    totalMessages: 0,
-    todayMessages: 0,
-    todayActiveUsers: new Set<number>(),
-    lastResetDate: new Date().toDateString()
-  };
-
-  function resetDailyStatsIfNeeded() {
-    const today = new Date().toDateString();
-    if (messageStats.lastResetDate !== today) {
-      messageStats.todayMessages = 0;
-      messageStats.todayActiveUsers.clear();
-      messageStats.lastResetDate = today;
-    }
-  }
-
-  function recordMessageStat(userId: number) {
-    resetDailyStatsIfNeeded();
-    messageStats.totalMessages++;
-    messageStats.todayMessages++;
-    messageStats.todayActiveUsers.add(userId);
   }
 
   async function api<T = unknown>(method: string, body: Record<string, unknown>, token?: string, retries = 3): Promise<T | null> {
@@ -466,7 +470,10 @@ export function createBot(env: Env) {
     if (ok === null) { await showFail(ctx.chatId, ctx.msgId, '操作'); return; }
     await editOrSend(ctx.chatId,
       `${head(title)}\n\n${body}`, {
-      reply_markup: mk([{ text: '❌ 取消', callback_data: cancelTo }])
+      // 取消必须走 cancel_to_ 路由：既清掉刚建的 session，又跳回目标面板。
+      // 之前取消只跳面板不清 session，残留 30 分钟——期间管理员发任何文本
+      // 都会被当成这次会话的输入吞掉（比如误存成欢迎语）。
+      reply_markup: mk([{ text: '❌ 取消', callback_data: `cancel_to_${cancelTo}` }])
     }, ctx.msgId);
   }
 
@@ -1026,8 +1033,15 @@ export function createBot(env: Env) {
         parse_mode: 'HTML',
         reply_markup: replyMarkup
       });
-    } else if (replyType === 'sticker') {
-      sentMsg = await sendMsg(userId, caption, { reply_markup: replyMarkup });
+    } else if (replyType === 'sticker' && msg.sticker) {
+      // 先发说明文本，再发真实贴纸（之前这里只发文本，贴纸本体被丢弃）
+      const textMsg = await sendMsg(userId, caption);
+      sentMsg = await api<TelegramMessage>('sendSticker', {
+        chat_id: userId,
+        sticker: msg.sticker.file_id,
+        reply_markup: replyMarkup
+      });
+      if (!sentMsg && textMsg) sentMsg = textMsg;
     } else {
       sentMsg = await sendMsg(userId, caption, { reply_markup: replyMarkup });
     }
@@ -1882,6 +1896,14 @@ export function createBot(env: Env) {
   ]);
 
   const CALLBACK_PREFIX: Array<{ prefix: string; handler: CbHandler }> = [
+    { prefix: 'cancel_to_', handler: async (ctx) => {
+      // 取消输入会话：先清 session（防残留吞文本），再跳回 cancelTo 指向的面板
+      const target = ctx.data.slice('cancel_to_'.length);
+      fire(db.clearUserSession(ctx.userId));
+      const panelHandler = CALLBACK_EXACT.get(target);
+      if (panelHandler) { await panelHandler(ctx); return; }
+      await editOrSend(ctx.chatId, '❌ 已取消', undefined, ctx.msgId);
+    } },
     { prefix: 'pm_user_list_', handler: async (ctx) => { await showPmUserList(ctx.chatId, cbNum(ctx.data, 3), ctx.msgId); } },
     { prefix: 'ignore_msg_', handler: async (ctx) => {
       deletePendingMessage(cbNum(ctx.data, 2));
@@ -2264,5 +2286,50 @@ export function createBot(env: Env) {
     return { fetched };
   }
 
-  return { handleUpdate, handlePoll };
+  // ============ 定时消息发送器 ============
+  /**
+   * 扫描到期的待发定时消息并投递。
+   * 只由 PollerDO 的 alarm（DO 单实例、闹钟不并发）每轮调用一次——
+   * webhook 路径绝不调用，避免同一条消息被多次发送。
+   * user_id 为空表示广播给全部用户（每批并发 10）。
+   * 投递失败也标记已发送（记日志+审计），防止永久重试刷爆；失败数体现在审计里。
+   */
+  async function processScheduledMessages(): Promise<{ scanned: number; sent: number; failed: number }> {
+    const due = (await db.getPendingScheduledMessages().catch(e => {
+      log.error('Error fetching scheduled messages', { error: e });
+      return null;
+    })) || [];
+    if (due.length === 0) return { scanned: 0, sent: 0, failed: 0 };
+
+    let sent = 0;
+    let failed = 0;
+    for (const m of due) {
+      try {
+        if (m.user_id) {
+          const ok = await sendMsg(m.user_id, escapeHtml(m.content));
+          if (ok) sent++; else failed++;
+        } else {
+          const users = await db.getPmUsers(1000);
+          const CONCURRENCY = 10;
+          for (let i = 0; i < users.length; i += CONCURRENCY) {
+            const results = await Promise.allSettled(
+              users.slice(i, i + CONCURRENCY).map(u => sendMsg(u.user_id, escapeHtml(m.content)))
+            );
+            for (const r of results) {
+              if (r.status === 'fulfilled' && r.value) sent++; else failed++;
+            }
+          }
+        }
+      } catch (e) {
+        log.error('Scheduled message dispatch error', { id: m.id, error: e });
+        failed++;
+      }
+      await db.markScheduledMessageSent(m.id).catch(() => {});
+    }
+    log.info('Scheduled messages dispatched', { count: due.length, sent, failed });
+    fire(db.addAuditLog(getPrimaryAdminId(), 'scheduled_send', 'system', 'batch', `${due.length} 条：成功 ${sent}，失败 ${failed}`));
+    return { scanned: due.length, sent, failed };
+  }
+
+  return { handleUpdate, handlePoll, processScheduledMessages };
 }
