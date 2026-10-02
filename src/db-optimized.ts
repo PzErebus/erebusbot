@@ -148,7 +148,7 @@ export class OptimizedDatabase {
   }
 
   // ============ Settings with Cache ============
-  async getSetting(key: string): Promise<string | null> {
+  async getSetting(key: string, ttl = 300): Promise<string | null> {
     const cacheKey = `setting:${key}`;
     const cached = this.cache.get<string>(cacheKey);
     if (cached !== undefined) return cached;
@@ -158,7 +158,7 @@ export class OptimizedDatabase {
         const r = await this.db.prepare('SELECT value FROM pm_settings WHERE key = ?').bind(key).first<{ value: string }>();
         return r?.value || null;
       });
-      this.cache.set(cacheKey, result, 300); // 5分钟缓存
+      this.cache.set(cacheKey, result, ttl); // 默认5分钟；反垃圾配置等需要快生效的场景传短 TTL
       return result;
     } catch (e) {
       log.error('getSetting error', { key, error: e });

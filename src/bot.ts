@@ -35,14 +35,19 @@ const spamNotifyAt = new Map<number, number>();
  * 返回 allowed=false 时消息应被静默拦截（不回复用户，避免给刷屏者喂反馈）。
  * （export 仅为测试可达）
  */
-export function checkRateLimit(userId: number, now = Date.now()): { allowed: boolean; violations: number } {
+export function checkRateLimit(
+  userId: number,
+  now = Date.now(),
+  windowMs = RATE_WINDOW_MS,
+  maxMsgs = RATE_MAX_MSGS
+): { allowed: boolean; violations: number } {
   let stamps = rateWindows.get(userId);
   if (!stamps) {
     stamps = [];
     rateWindows.set(userId, stamps);
   }
-  while (stamps.length > 0 && now - stamps[0] > RATE_WINDOW_MS) stamps.shift();
-  if (stamps.length >= RATE_MAX_MSGS) {
+  while (stamps.length > 0 && now - stamps[0] > windowMs) stamps.shift();
+  if (stamps.length >= maxMsgs) {
     const violations = (rateViolations.get(userId) || 0) + 1;
     rateViolations.set(userId, violations);
     return { allowed: false, violations };
@@ -81,7 +86,7 @@ export function resetAntiSpamState(): void {
 }
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610021255';
+export const BOT_VERSION = '202610021305';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -483,6 +488,23 @@ export function createBot(env: Env) {
   }
 
   /**
+   * 反垃圾配置：读 pm_settings（30s 短缓存，开关/阈值改动快速生效）。
+   * 键：antispam_enabled / adfilter_enabled（'0' 为关，缺省开）、
+   *     rate_window_sec（3-120，默认 10）、rate_max_msgs（2-50，默认 5）。
+   */
+  async function getAntispamConfig(): Promise<{ rateEnabled: boolean; adEnabled: boolean; windowSec: number; maxMsgs: number }> {
+    const [rateS, adS, winS, maxS] = await Promise.all([
+      db.getSetting('antispam_enabled', 30).catch(() => null),
+      db.getSetting('adfilter_enabled', 30).catch(() => null),
+      db.getSetting('rate_window_sec', 30).catch(() => null),
+      db.getSetting('rate_max_msgs', 30).catch(() => null),
+    ]);
+    const windowSec = Math.max(3, Math.min(120, parseInt(winS || '10', 10) || 10));
+    const maxMsgs = Math.max(2, Math.min(50, parseInt(maxS || '5', 10) || 5));
+    return { rateEnabled: rateS !== '0', adEnabled: adS !== '0', windowSec, maxMsgs };
+  }
+
+  /**
    * 垃圾消息违规处理：审计落库 + 节流告警管理员（附封禁快捷按钮）。
    * 频率超限对用户完全静默；广告命中回复与黑名单一致的提示语，不暴露拦截原因。
    */
@@ -490,9 +512,12 @@ export function createBot(env: Env) {
     user: NonNullable<TelegramMessage['from']>,
     kind: 'rate' | 'ad',
     violations: number,
-    adLabel?: string
+    adLabel?: string,
+    rateDesc?: string
   ): Promise<void> {
-    const reason = kind === 'rate' ? `刷屏（10秒内超${RATE_MAX_MSGS}条，累计超限${violations}次）` : `广告特征：${adLabel}`;
+    const reason = kind === 'rate'
+      ? (rateDesc || `刷屏（10秒内超${RATE_MAX_MSGS}条，累计超限${violations}次）`)
+      : `广告特征：${adLabel}`;
     // 审计与告警都不阻塞主流程
     fire(db.addAuditLog(user.id, 'spam_blocked', 'user', String(user.id), reason));
     const now = Date.now();
@@ -571,19 +596,25 @@ export function createBot(env: Env) {
         return;
       }
 
-      // 反垃圾第一道：滑动窗口限流——超限静默拦截，不回复（回复只会给刷屏者喂反馈）
-      const rate = checkRateLimit(user.id);
-      if (!rate.allowed) {
-        await handleSpamViolation(user, 'rate', rate.violations);
-        return;
+      // 反垃圾第一道：滑动窗口限流（开关/阈值见「消息过滤 → 反垃圾设置」）
+      const asCfg = await getAntispamConfig();
+      if (asCfg.rateEnabled) {
+        const rate = checkRateLimit(user.id, Date.now(), asCfg.windowSec * 1000, asCfg.maxMsgs);
+        if (!rate.allowed) {
+          await handleSpamViolation(user, 'rate', rate.violations, undefined,
+            `刷屏（${asCfg.windowSec}秒内超${asCfg.maxMsgs}条，累计超限${rate.violations}次）`);
+          return;
+        }
       }
 
       // 反垃圾第二道：广告特征识别——提示语与黑名单一致，不暴露具体拦截原因
-      const adLabel = matchAd(text);
-      if (adLabel) {
-        await handleSpamViolation(user, 'ad', 0, adLabel);
-        await sendMsg(chatId, '⚠️ 您的消息包含敏感内容，无法发送。');
-        return;
+      if (asCfg.adEnabled) {
+        const adLabel = matchAd(text);
+        if (adLabel) {
+          await handleSpamViolation(user, 'ad', 0, adLabel);
+          await sendMsg(chatId, '⚠️ 您的消息包含敏感内容，无法发送。');
+          return;
+        }
       }
 
       if (!isWorkHours) {
@@ -834,6 +865,32 @@ export function createBot(env: Env) {
           await sendMsg(chatId, '❌ 格式错误，请使用: 开始-结束 (如 9-18)');
         }
       } catch { await sendMsg(chatId, '❌ 设置失败'); }
+      fire(db.clearUserSession(userId));
+    },
+
+    async antispam_window(text, chatId, userId) {
+      const sec = parseInt(text.trim(), 10);
+      if (!sec || sec < 3 || sec > 120) {
+        await sendMsg(chatId, '❌ 请输入 3-120 之间的整数秒数：');
+        return;
+      }
+      const ok = await guard('antispam_window')(db.updateSetting('rate_window_sec', String(sec)));
+      if (ok === null) { await sendMsg(chatId, '❌ 设置失败'); return; }
+      await sendMsg(chatId, `✅ 限流窗口已设为 ${sec} 秒`);
+      await showAntiSpam(chatId);
+      fire(db.clearUserSession(userId));
+    },
+
+    async antispam_max(text, chatId, userId) {
+      const n = parseInt(text.trim(), 10);
+      if (!n || n < 2 || n > 50) {
+        await sendMsg(chatId, '❌ 请输入 2-50 之间的整数条数：');
+        return;
+      }
+      const ok = await guard('antispam_max')(db.updateSetting('rate_max_msgs', String(n)));
+      if (ok === null) { await sendMsg(chatId, '❌ 设置失败'); return; }
+      await sendMsg(chatId, `✅ 条数上限已设为 ${n} 条`);
+      await showAntiSpam(chatId);
       fire(db.clearUserSession(userId));
     },
 
@@ -1526,7 +1583,44 @@ export function createBot(env: Env) {
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: '🔒 关键词规则', callback_data: 'blacklist' }],
+          [{ text: '🧹 反垃圾设置', callback_data: 'antispam' }],
           [{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }]
+        )
+      }, messageId);
+    } catch (e) {
+      await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
+    }
+  }
+
+  /** 反垃圾设置面板：限流/广告拦截开关 + 阈值调整 + 最近拦截记录 */
+  async function showAntiSpam(chatId: number, messageId?: number): Promise<void> {
+    try {
+      const [cfg, logs] = await Promise.all([
+        getAntispamConfig(),
+        db.getAuditLogs(50).catch(() => [] as Array<{ action: string; target_id: string | null; created_at: number }>)
+      ]);
+      const spamLogs = logs.filter(l => l.action === 'spam_blocked').slice(0, 3);
+
+      let text = head('🧹 反垃圾设置', '频率限制 · 广告拦截') +
+        `\n\n<b>▸ 频率限制</b> ${cfg.rateEnabled ? '🟢 开启' : '⛔ 关闭'}` +
+        `\n同一用户 ${cfg.windowSec} 秒内最多 ${cfg.maxMsgs} 条，超限静默拦截` +
+        `\n\n<b>▸ 广告拦截</b> ${cfg.adEnabled ? '🟢 开启' : '⛔ 关闭'}` +
+        `\n博彩 / 刷单 / 引流 / 贷款等 10 类特征识别`;
+      if (spamLogs.length > 0) {
+        text += `\n\n<b>▸ 最近拦截</b>`;
+        for (const l of spamLogs) {
+          text += `\n· ${fmtTime(l.created_at)}  <code>${escapeHtml(trunc(l.target_id || '', 14))}</code>`;
+        }
+      }
+      text += tip('改动约 30 秒内全网生效');
+
+      await editOrSend(chatId, text, {
+        reply_markup: mk(
+          [{ text: cfg.rateEnabled ? '🚦 频率限制：✅ 开' : '🚦 频率限制：⏸️ 关', callback_data: 'antispam_toggle_rate' },
+           { text: cfg.adEnabled ? '📣 广告拦截：✅ 开' : '📣 广告拦截：⏸️ 关', callback_data: 'antispam_toggle_ad' }],
+          [{ text: `⏱️ 窗口 ${cfg.windowSec}s`, callback_data: 'antispam_set_window' },
+           { text: `📨 上限 ${cfg.maxMsgs} 条`, callback_data: 'antispam_set_max' }],
+          [{ text: '◀ 消息过滤', callback_data: 'msg_filter' }, { text: '🏠 主页', callback_data: 'admin_back' }]
         )
       }, messageId);
     } catch (e) {
@@ -1800,6 +1894,7 @@ export function createBot(env: Env) {
     ['settings', async (ctx) => { await showPmSettings(ctx.chatId, ctx.msgId); }],
     ['pending_messages', async (ctx) => { await showPendingMessages(ctx.chatId, ctx.msgId); }],
     ['msg_filter', async (ctx) => { await showMessageFilter(ctx.chatId, ctx.msgId); }],
+    ['antispam', async (ctx) => { await showAntiSpam(ctx.chatId, ctx.msgId); }],
     ['reply_mgmt', async (ctx) => { await showReplyManagement(ctx.chatId, ctx.msgId); }],
     ['auto_replies', async (ctx) => { await showAutoReplies(ctx.chatId, 0, ctx.msgId); }],
     ['blacklist', async (ctx) => { await showBlacklistKeywords(ctx.chatId, 0, ctx.msgId); }],
@@ -1903,6 +1998,26 @@ export function createBot(env: Env) {
       const panelHandler = CALLBACK_EXACT.get(target);
       if (panelHandler) { await panelHandler(ctx); return; }
       await editOrSend(ctx.chatId, '❌ 已取消', undefined, ctx.msgId);
+    } },
+    { prefix: 'antispam_toggle_', handler: async (ctx) => {
+      // 开关：'0' 关 / 缺省或 '1' 开；切换后 updateSetting 已清缓存，本 isolate 立即生效
+      const what = ctx.data.slice('antispam_toggle_'.length);
+      const key = what === 'rate' ? 'antispam_enabled' : 'adfilter_enabled';
+      const cur = (await db.getSetting(key, 30).catch(() => null)) !== '0';
+      const ok = await guard('antispam_toggle')(db.updateSetting(key, cur ? '0' : '1'));
+      if (ok === null) { await showFail(ctx.chatId, ctx.msgId, '设置'); return; }
+      await showAntiSpam(ctx.chatId, ctx.msgId);
+    } },
+    { prefix: 'antispam_set_', handler: async (ctx) => {
+      const what = ctx.data.slice('antispam_set_'.length);
+      const cfg = await getAntispamConfig();
+      if (what === 'window') {
+        await promptInput(ctx, 'antispam_window', '设置限流窗口',
+          `当前窗口：${cfg.windowSec} 秒\n\n请输入新的窗口秒数（3-120 的整数）：`, 'antispam');
+      } else {
+        await promptInput(ctx, 'antispam_max', '设置条数上限',
+          `当前上限：${cfg.maxMsgs} 条\n\n请输入窗口内允许的最大条数（2-50 的整数）：`, 'antispam');
+      }
     } },
     { prefix: 'pm_user_list_', handler: async (ctx) => { await showPmUserList(ctx.chatId, cbNum(ctx.data, 3), ctx.msgId); } },
     { prefix: 'ignore_msg_', handler: async (ctx) => {
