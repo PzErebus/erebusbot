@@ -81,7 +81,7 @@ export function resetAntiSpamState(): void {
 }
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610020940';
+export const BOT_VERSION = '202610021015';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 

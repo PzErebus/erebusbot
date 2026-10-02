@@ -5,215 +5,354 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ErebusBot 管理后台</title>
     <style>
+        :root {
+            --bg: #f3f5fb;
+            --card: #ffffff;
+            --line: #e7eaf3;
+            --ink: #1c2340;
+            --muted: #7b83a0;
+            --accent: #5b6cff;
+            --accent-2: #8b5cf6;
+            --ok: #16a34a;
+            --bad: #dc2626;
+            --warn: #d97706;
+            --info: #0891b2;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f2f5;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
+            background:
+                radial-gradient(900px 300px at 85% -80px, rgba(91,108,255,0.08), transparent 60%),
+                radial-gradient(700px 260px at 0% -60px, rgba(139,92,246,0.07), transparent 55%),
+                var(--bg);
+            color: var(--ink);
             line-height: 1.6;
+            min-height: 100vh;
         }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 25px 20px;
-            text-align: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+
+        /* ===== 顶栏 ===== */
+        .topbar {
+            background: linear-gradient(120deg, #10142e 0%, #1b2150 70%, #2a2160 100%);
+            color: #fff;
+            box-shadow: 0 4px 18px rgba(16,20,46,0.25);
+            position: sticky;
+            top: 0;
+            z-index: 50;
         }
-        .header h1 { font-size: 28px; margin-bottom: 8px; font-weight: 600; }
-        .header p { opacity: 0.9; font-size: 14px; }
+        .topbar-inner {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 16px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .brand {
+            font-size: 21px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .brand-dot {
+            width: 11px; height: 11px;
+            border-radius: 50%;
+            background: #34d399;
+            box-shadow: 0 0 0 4px rgba(52,211,153,0.22);
+            animation: breath 2.4s ease-in-out infinite;
+        }
+        .brand em { font-style: normal; font-weight: 500; font-size: 14px; color: #aab2e8; margin-left: 2px; }
+        .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 999px;
+            font-size: 12.5px;
+            font-weight: 600;
+            background: rgba(255,255,255,0.1);
+            color: #d7dcff;
+            border: 1px solid rgba(255,255,255,0.14);
+            transition: all 0.3s;
+        }
+        .chip-ok { background: rgba(52,211,153,0.16); color: #6ee7b7; border-color: rgba(52,211,153,0.35); }
+        .chip-bad { background: rgba(248,113,113,0.16); color: #fca5a5; border-color: rgba(248,113,113,0.35); }
+        .chip-ghost { background: transparent; color: #aab2e8; }
+        .topbar-link {
+            font-size: 13px;
+            color: #c3caff;
+            cursor: pointer;
+            text-decoration: underline;
+            text-underline-offset: 3px;
+            opacity: 0.85;
+        }
+        .topbar-link:hover { opacity: 1; }
+
+        /* ===== 导航 ===== */
         .nav {
-            background: white;
-            padding: 0 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            background: var(--card);
+            padding: 10px 20px;
+            box-shadow: 0 1px 0 var(--line);
             display: flex;
             justify-content: center;
-            gap: 0;
+            gap: 8px;
+            flex-wrap: wrap;
         }
         .nav-item {
-            padding: 15px 25px;
+            padding: 9px 22px;
             cursor: pointer;
-            border-bottom: 3px solid transparent;
-            transition: all 0.3s;
+            border-radius: 999px;
+            transition: all 0.25s;
             font-weight: 500;
-            color: #666;
+            color: var(--muted);
+            font-size: 14.5px;
+            border: 1px solid transparent;
         }
-        .nav-item:hover { color: #667eea; background: #f8f9fa; }
+        .nav-item:hover { color: var(--accent); background: #eef0ff; }
         .nav-item.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
-            background: #f8f9fa;
+            color: #fff;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            box-shadow: 0 4px 12px rgba(91,108,255,0.32);
         }
+
+        /* ===== 容器与卡片 ===== */
         .container {
             max-width: 1400px;
             margin: 0 auto;
-            padding: 25px 20px;
+            padding: 26px 20px 40px;
         }
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 18px;
+            margin-bottom: 26px;
         }
         .stat-card {
-            background: white;
-            border-radius: 12px;
-            padding: 25px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-            transition: all 0.3s;
-            border-left: 4px solid #667eea;
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(28,35,64,0.05);
+            transition: all 0.25s;
+            position: relative;
+            overflow: hidden;
         }
-        .stat-card:hover { transform: translateY(-3px); box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .stat-card .icon { font-size: 36px; margin-bottom: 12px; }
-        .stat-card .number { font-size: 32px; font-weight: bold; color: #333; margin-bottom: 5px; }
-        .stat-card .label { color: #888; font-size: 14px; }
-        .stat-card.primary { border-left-color: #667eea; }
-        .stat-card.success { border-left-color: #28a745; }
-        .stat-card.warning { border-left-color: #ffc107; }
-        .stat-card.danger { border-left-color: #dc3545; }
-        .stat-card.info { border-left-color: #17a2b8; }
+        .stat-card::after {
+            content: '';
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 4px;
+            background: var(--accent);
+        }
+        .stat-card:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(28,35,64,0.1); }
+        .stat-card .icon {
+            width: 46px; height: 46px;
+            border-radius: 13px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 23px;
+            margin-bottom: 12px;
+            background: linear-gradient(135deg, #eef0ff, #f3efff);
+        }
+        .stat-card .number { font-size: 30px; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 2px; font-variant-numeric: tabular-nums; }
+        .stat-card .label { color: var(--muted); font-size: 13.5px; }
+        .stat-card.primary { border-left-color: var(--accent); }
+        .stat-card.success { border-left-color: var(--ok); }
+        .stat-card.warning { border-left-color: var(--warn); }
+        .stat-card.danger { border-left-color: var(--bad); }
+        .stat-card.info { border-left-color: var(--info); }
         .stat-card.secondary { border-left-color: #6c757d; }
+
         .section {
-            background: white;
-            border-radius: 12px;
-            padding: 25px;
-            margin-bottom: 25px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 22px;
+            margin-bottom: 22px;
+            box-shadow: 0 2px 10px rgba(28,35,64,0.05);
         }
         .section-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid #f0f2f5;
+            margin-bottom: 18px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid var(--line);
+            flex-wrap: wrap;
+            gap: 10px;
         }
-        .section h2 { font-size: 20px; color: #333; font-weight: 600; }
-        .toolbar { display: flex; gap: 10px; align-items: center; }
+        .section h2 { font-size: 17.5px; font-weight: 700; }
+        .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+        /* ===== 状态行与比例条 ===== */
+        .sys-rows { display: flex; flex-direction: column; gap: 4px; }
+        .sys-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 4px;
+            border-bottom: 1px dashed var(--line);
+            font-size: 14px;
+        }
+        .sys-row:last-child { border-bottom: none; }
+        .sys-row .k { color: var(--muted); }
+        .sys-row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+        .meter { position: relative; height: 9px; border-radius: 999px; background: #edf0f8; overflow: hidden; }
+        .meter > span {
+            display: block;
+            height: 100%;
+            width: 0;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            transition: width 0.6s ease;
+        }
+        .meter.m-unread > span { background: linear-gradient(90deg, #38bdf8, var(--info)); }
+        .meter-row { padding: 10px 4px; }
+        .meter-row .meter-head { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 7px; }
+        .meter-row .meter-head .k { color: var(--muted); }
+        .meter-row .meter-head .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+        /* ===== 按钮 / 输入 ===== */
         .btn {
-            padding: 8px 16px;
+            padding: 8px 18px;
             border: none;
-            border-radius: 6px;
+            border-radius: 9px;
             cursor: pointer;
             font-size: 14px;
-            font-weight: 500;
+            font-weight: 600;
             transition: all 0.2s;
             display: inline-flex;
             align-items: center;
             gap: 6px;
         }
-        .btn-primary { background: #667eea; color: white; }
-        .btn-primary:hover { background: #5568d3; }
+        .btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; box-shadow: 0 3px 10px rgba(91,108,255,0.28); }
+        .btn-primary:hover { filter: brightness(1.06); transform: translateY(-1px); }
         .btn-secondary { background: #6c757d; color: white; }
         .btn-secondary:hover { background: #5a6268; }
         .search-box {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
+            padding: 9px 14px;
+            border: 1px solid var(--line);
+            border-radius: 9px;
             font-size: 14px;
-            width: 200px;
+            width: 210px;
+            background: #fafbff;
+            transition: all 0.2s;
         }
-        .search-box:focus { outline: none; border-color: #667eea; }
+        .search-box:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,108,255,0.12); }
+        .filter-select {
+            padding: 9px 12px;
+            border: 1px solid var(--line);
+            border-radius: 9px;
+            font-size: 14px;
+            background: #fafbff;
+            color: var(--ink);
+        }
+
+        /* ===== 表格 ===== */
         table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th, td { text-align: left; padding: 14px 12px; border-bottom: 1px solid #f0f2f5; }
+        th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--line); }
         th {
-            background: #f8f9fa;
+            background: #f7f8fd;
             font-weight: 600;
-            color: #555;
-            text-transform: uppercase;
+            color: var(--muted);
             font-size: 12px;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.6px;
         }
-        tr:hover { background: #f8f9fa; }
+        tbody tr { transition: background 0.15s; }
+        tbody tr:hover { background: #f7f8fd; }
+
+        /* ===== 徽章 ===== */
         .badge {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 20px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 11px;
+            border-radius: 999px;
             font-size: 12px;
-            font-weight: 500;
+            font-weight: 600;
         }
-        .badge-success { background: #d4edda; color: #155724; }
-        .badge-danger { background: #f8d7da; color: #721c24; }
-        .badge-warning { background: #fff3cd; color: #856404; }
-        .badge-info { background: #d1ecf1; color: #0c5460; }
-        .badge-secondary { background: #e2e3e5; color: #383d41; }
-        .loading { text-align: center; padding: 50px; color: #888; }
+        .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .badge-success { background: #e7f8ee; color: #15803d; }
+        .badge-danger { background: #fdecec; color: #b91c1c; }
+        .badge-warning { background: #fdf3e2; color: #b45309; }
+        .badge-info { background: #e3f5fa; color: #0e7490; }
+        .badge-secondary { background: #eceef3; color: #475069; }
+
+        /* ===== 加载 / 空态 / 错误 ===== */
+        .loading { text-align: center; padding: 46px; color: var(--muted); }
         .loading-spinner {
             display: inline-block;
-            width: 40px;
-            height: 40px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
+            width: 38px; height: 38px;
+            border: 3px solid #e7eaf3;
+            border-top: 3px solid var(--accent);
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin-bottom: 15px;
+            margin-bottom: 14px;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
+        @keyframes breath { 0%, 100% { box-shadow: 0 0 0 4px rgba(52,211,153,0.22); } 50% { box-shadow: 0 0 0 7px rgba(52,211,153,0.08); } }
         .error {
-            background: #f8d7da;
-            color: #721c24;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 20px 0;
-            border-left: 4px solid #dc3545;
+            background: #fdecec;
+            color: #b91c1c;
+            padding: 14px;
+            border-radius: 10px;
+            margin: 16px 0;
+            border-left: 4px solid var(--bad);
+            font-size: 14px;
         }
-        .empty-state { text-align: center; padding: 60px 20px; color: #888; }
-        .empty-state-icon { font-size: 48px; margin-bottom: 15px; opacity: 0.5; }
+        .empty-state { text-align: center; padding: 54px 20px; color: var(--muted); }
+        .empty-state-icon { font-size: 44px; margin-bottom: 12px; opacity: 0.55; }
+
+        /* ===== 标签页 ===== */
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+
+        /* ===== 用户操作 ===== */
         .user-actions { display: flex; gap: 8px; }
         .action-btn {
-            padding: 4px 10px;
+            padding: 4px 12px;
             font-size: 12px;
-            border-radius: 4px;
+            font-weight: 600;
+            border-radius: 7px;
             cursor: pointer;
             border: none;
             transition: all 0.2s;
         }
-        .action-btn.view { background: #e3f2fd; color: #1976d2; }
-        .action-btn.view:hover { background: #bbdefb; }
-        .action-btn.ban { background: #ffebee; color: #c62828; }
-        .action-btn.ban:hover { background: #ffcdd2; }
-        .action-btn.unban { background: #e8f5e9; color: #2e7d32; }
-        .action-btn.unban:hover { background: #c8e6c9; }
-        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 20px; }
+        .action-btn.view { background: #e8f0fe; color: #1a56db; }
+        .action-btn.view:hover { background: #d5e3fd; }
+        .action-btn.ban { background: #fdecec; color: #b91c1c; }
+        .action-btn.ban:hover { background: #fbdcdc; }
+        .action-btn.unban { background: #e7f8ee; color: #15803d; }
+        .action-btn.unban:hover { background: #d3f2e0; }
+
+        /* ===== 分页 ===== */
+        .pagination { display: flex; justify-content: center; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
         .page-btn {
-            padding: 8px 14px;
-            border: 1px solid #ddd;
-            background: white;
-            border-radius: 6px;
+            padding: 7px 14px;
+            border: 1px solid var(--line);
+            background: var(--card);
+            border-radius: 8px;
             cursor: pointer;
             transition: all 0.2s;
+            font-size: 13.5px;
+            color: var(--ink);
         }
-        .page-btn:hover { background: #f8f9fa; }
-        .page-btn.active { background: #667eea; color: white; border-color: #667eea; }
-        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .chart-placeholder {
-            height: 200px;
-            background: #f8f9fa;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #888;
-        }
-        .filter-select {
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 14px;
-            background: white;
-        }
-        .stats-overview {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 25px;
-        }
+        .page-btn:hover { background: #eef0ff; border-color: var(--accent); color: var(--accent); }
+        .page-btn.active { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border-color: transparent; }
+        .page-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+        /* ===== 登录弹层 ===== */
         .login-mask {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(15, 23, 42, 0.5);
+            background: rgba(16, 20, 46, 0.55);
+            backdrop-filter: blur(4px);
             display: none;
             align-items: center;
             justify-content: center;
@@ -221,40 +360,43 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         }
         .login-mask.show { display: flex; }
         .login-box {
-            background: white;
-            border-radius: 14px;
+            background: var(--card);
+            border-radius: 18px;
             padding: 32px 30px;
-            width: 340px;
+            width: 350px;
             max-width: 90vw;
-            box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+            box-shadow: 0 24px 60px rgba(16,20,46,0.35);
         }
-        .login-box h2 { font-size: 19px; margin-bottom: 6px; color: #333; }
-        .login-box .login-sub { font-size: 13px; color: #888; margin-bottom: 18px; }
+        .login-box h2 { font-size: 19px; margin-bottom: 6px; }
+        .login-box .login-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
         .login-box input {
             width: 100%;
-            padding: 11px 12px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
+            padding: 11px 13px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
             font-size: 14px;
             margin-bottom: 12px;
+            background: #fafbff;
+            transition: all 0.2s;
         }
-        .login-box input:focus { outline: none; border-color: #667eea; }
+        .login-box input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,108,255,0.12); }
         .login-box .btn { width: 100%; }
-        .login-error { color: #d93025; font-size: 13px; min-height: 20px; margin-top: 6px; }
-        .header-auth {
-            margin-top: 10px;
-            font-size: 13px;
-            opacity: 0.9;
-            cursor: pointer;
-            text-decoration: underline;
-        }
+        .login-error { color: var(--bad); font-size: 13px; min-height: 20px; margin-top: 6px; }
+
+        /* ===== 页脚 ===== */
+        .footer { text-align: center; color: var(--muted); font-size: 12.5px; padding: 10px 0 26px; }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🤖 ErebusBot 管理后台</h1>
-        <p>实时查看 Bot 运行状态和用户数据</p>
-        <div class="header-auth" onclick="showLogin()">🔐 管理员登录 / 切换身份</div>
+    <div class="topbar">
+        <div class="topbar-inner">
+            <div class="brand"><span class="brand-dot"></span>ErebusBot <em>· 管理控制台</em></div>
+            <div class="topbar-right">
+                <span class="chip" id="sysChip">● 检测中…</span>
+                <span class="chip chip-ghost" id="verChip">v—</span>
+                <span class="topbar-link" onclick="showLogin()">🔐 管理员登录</span>
+            </div>
+        </div>
     </div>
 
     <div class="login-mask" id="loginMask">
@@ -270,7 +412,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="nav">
         <div class="nav-item active" onclick="showTab('overview', this)">📊 总览</div>
         <div class="nav-item" onclick="showTab('users', this)">👥 用户管理</div>
-        <div class="nav-item" onclick="showTab('messages', this)">📊 消息统计</div>
+        <div class="nav-item" onclick="showTab('messages', this)">💬 消息统计</div>
         <div class="nav-item" onclick="showTab('search', this)">🔍 消息搜索</div>
     </div>
 
@@ -308,15 +450,45 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             <div class="stats-overview">
                 <div class="section">
                     <div class="section-header">
-                        <h2>📈 消息趋势</h2>
+                        <h2>🖥️ 系统状态</h2>
                     </div>
-                    <div class="chart-placeholder">消息统计图表（开发中）</div>
+                    <div class="sys-rows">
+                        <div class="sys-row">
+                            <span class="k">Worker 服务</span>
+                            <span class="v" id="sysHealthV">检测中…</span>
+                        </div>
+                        <div class="sys-row">
+                            <span class="k">当前版本</span>
+                            <span class="v" id="sysVersionV">—</span>
+                        </div>
+                        <div class="sys-row">
+                            <span class="k">收发模式</span>
+                            <span class="v">Webhook 推送</span>
+                        </div>
+                        <div class="sys-row">
+                            <span class="k">自动刷新</span>
+                            <span class="v">每 30 秒</span>
+                        </div>
+                    </div>
                 </div>
                 <div class="section">
                     <div class="section-header">
-                        <h2>👥 用户增长</h2>
+                        <h2>📈 消息构成</h2>
                     </div>
-                    <div class="chart-placeholder">用户增长图表（开发中）</div>
+                    <div class="meter-row">
+                        <div class="meter-head">
+                            <span class="k">今日消息占总量</span>
+                            <span class="v" id="barTodayText">—</span>
+                        </div>
+                        <div class="meter"><span id="barToday"></span></div>
+                    </div>
+                    <div class="meter-row">
+                        <div class="meter-head">
+                            <span class="k">未读消息占总量</span>
+                            <span class="v" id="barUnreadText">—</span>
+                        </div>
+                        <div class="meter m-unread"><span id="barUnread"></span></div>
+                    </div>
                 </div>
             </div>
 
@@ -362,7 +534,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         <div id="messages" class="tab-content">
             <div class="section">
                 <div class="section-header">
-                    <h2>📊 消息统计</h2>
+                    <h2>💬 消息统计</h2>
                     <div class="toolbar">
                         <button class="btn btn-primary" onclick="loadMessageStats()">🔄 刷新</button>
                     </div>
@@ -376,9 +548,22 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             </div>
             <div class="section">
                 <div class="section-header">
-                    <h2>📈 消息趋势</h2>
+                    <h2>📈 消息构成</h2>
                 </div>
-                <div class="chart-placeholder">消息统计图表（开发中）</div>
+                <div class="meter-row">
+                    <div class="meter-head">
+                        <span class="k">今日消息占总量</span>
+                        <span class="v" id="barTodayText2">—</span>
+                    </div>
+                    <div class="meter"><span id="barToday2"></span></div>
+                </div>
+                <div class="meter-row">
+                    <div class="meter-head">
+                        <span class="k">未读消息占总量</span>
+                        <span class="v" id="barUnreadText2">—</span>
+                    </div>
+                    <div class="meter m-unread"><span id="barUnread2"></span></div>
+                </div>
             </div>
         </div>
 
@@ -402,6 +587,8 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         </div>
 
     </div>
+
+    <div class="footer">ErebusBot 管理控制台 · 数据每 30 秒自动刷新 · 未读消息每 10 秒轮询提醒</div>
 
     <script>
         // 全局数据存储
@@ -569,7 +756,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         function showTab(tabName, element) {
             document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
+
             if (element) {
                 element.classList.add('active');
             } else {
@@ -591,7 +778,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     throw new Error('HTTP ' + response.status);
                 }
                 const data = await response.json();
-                
+
                 if (data.error) {
                     console.error('加载统计数据失败:', data.error);
                     return;
@@ -606,6 +793,25 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                 if (unreadEl && data.unread !== undefined) {
                     unreadEl.textContent = data.unread;
                 }
+
+                // 美化 v2：同步更新消息构成比例条（总览 + 消息统计页两组）
+                const total = data.totalMessages || 0;
+                const today = data.todayMessages || 0;
+                const unread = data.unread || 0;
+                const pctToday = total > 0 ? Math.min(100, Math.round(today / total * 100)) : 0;
+                const pctUnread = total > 0 ? Math.min(100, Math.round(unread / total * 100)) : 0;
+                [['barToday', 'barTodayText'], ['barToday2', 'barTodayText2']].forEach(function(pair) {
+                    const bar = document.getElementById(pair[0]);
+                    const txt = document.getElementById(pair[1]);
+                    if (bar) bar.style.width = pctToday + '%';
+                    if (txt) txt.textContent = today + ' / ' + total + '（' + pctToday + '%）';
+                });
+                [['barUnread', 'barUnreadText'], ['barUnread2', 'barUnreadText2']].forEach(function(pair) {
+                    const bar = document.getElementById(pair[0]);
+                    const txt = document.getElementById(pair[1]);
+                    if (bar) bar.style.width = pctUnread + '%';
+                    if (txt) txt.textContent = unread + ' / ' + total + '（' + pctUnread + '%）';
+                });
             } catch (err) {
                 console.error('加载统计数据失败:', err);
             }
@@ -619,7 +825,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     throw new Error('HTTP ' + response.status);
                 }
                 const data = await response.json();
-                
+
                 if (data.error) {
                     showError('usersContainer', data.error);
                     return;
@@ -636,7 +842,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         function showError(containerId, message) {
             const container = document.getElementById(containerId);
             container.innerHTML = '';
-            
+
             const errorDiv = document.createElement('div');
             errorDiv.className = 'error';
             errorDiv.appendChild(createTextNode(message));
@@ -649,15 +855,15 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             const filterType = document.getElementById('userFilter').value;
 
             let filtered = allUsers.filter(user => {
-                const matchesSearch = !searchTerm || 
+                const matchesSearch = !searchTerm ||
                     (user.first_name && user.first_name.toLowerCase().includes(searchTerm)) ||
                     (user.username && user.username.toLowerCase().includes(searchTerm)) ||
                     user.user_id.toString().includes(searchTerm);
-                
-                const matchesFilter = filterType === 'all' || 
+
+                const matchesFilter = filterType === 'all' ||
                     (filterType === 'active' && !user.is_blocked) ||
                     (filterType === 'blocked' && user.is_blocked);
-                
+
                 return matchesSearch && matchesFilter;
             });
 
@@ -672,18 +878,18 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             if (users.length === 0) {
                 const emptyState = document.createElement('div');
                 emptyState.className = 'empty-state';
-                
+
                 const icon = document.createElement('div');
                 icon.className = 'empty-state-icon';
                 icon.textContent = '👤';
-                
+
                 const text = document.createElement('div');
                 text.appendChild(createTextNode('暂无用户数据'));
-                
+
                 emptyState.appendChild(icon);
                 emptyState.appendChild(text);
                 container.appendChild(emptyState);
-                
+
                 document.getElementById('userPagination').innerHTML = '';
                 return;
             }
@@ -697,7 +903,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             const table = document.createElement('table');
             const thead = document.createElement('thead');
             const tbody = document.createElement('tbody');
-            
+
             // 表头
             const headerRow = document.createElement('tr');
             const headers = ['用户ID', '名字', '用户名', '消息数', '状态', '加入时间', '操作'];
@@ -707,31 +913,31 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                 headerRow.appendChild(th);
             });
             thead.appendChild(headerRow);
-            
+
             // 表体
             pageUsers.forEach(user => {
                 const row = document.createElement('tr');
-                
+
                 // 用户ID
                 const idCell = document.createElement('td');
                 idCell.appendChild(createTextNode(user.user_id));
                 row.appendChild(idCell);
-                
+
                 // 名字
                 const nameCell = document.createElement('td');
                 nameCell.appendChild(createTextNode(user.first_name || 'Unknown'));
                 row.appendChild(nameCell);
-                
+
                 // 用户名
                 const usernameCell = document.createElement('td');
                 usernameCell.appendChild(createTextNode(user.username ? '@' + user.username : '-'));
                 row.appendChild(usernameCell);
-                
+
                 // 消息数
                 const msgCell = document.createElement('td');
                 msgCell.appendChild(createTextNode(user.message_count || 0));
                 row.appendChild(msgCell);
-                
+
                 // 状态
                 const statusCell = document.createElement('td');
                 const badge = document.createElement('span');
@@ -739,27 +945,27 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                 badge.appendChild(createTextNode(user.is_blocked ? '已封禁' : '正常'));
                 statusCell.appendChild(badge);
                 row.appendChild(statusCell);
-                
+
                 // 加入时间
                 const dateCell = document.createElement('td');
                 const date = new Date(user.created_at * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
                 dateCell.appendChild(createTextNode(date));
                 row.appendChild(dateCell);
-                
+
                 // 操作
                 const actionCell = document.createElement('td');
                 actionCell.className = 'user-actions';
-                
+
                 const viewBtn = document.createElement('button');
                 viewBtn.className = 'action-btn view';
                 viewBtn.textContent = '查看';
                 viewBtn.onclick = function() { viewUser(user.user_id); };
                 actionCell.appendChild(viewBtn);
-                
+
                 const banBtn = document.createElement('button');
                 banBtn.className = user.is_blocked ? 'action-btn unban' : 'action-btn ban';
                 banBtn.textContent = user.is_blocked ? '解封' : '封禁';
-                banBtn.onclick = function() { 
+                banBtn.onclick = function() {
                     if (user.is_blocked) {
                         unbanUser(user.user_id);
                     } else {
@@ -767,11 +973,11 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     }
                 };
                 actionCell.appendChild(banBtn);
-                
+
                 row.appendChild(actionCell);
                 tbody.appendChild(row);
             });
-            
+
             table.appendChild(thead);
             table.appendChild(tbody);
             container.appendChild(table);
@@ -787,7 +993,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         function renderPagination(containerId, totalPages, currentPage, callback) {
             const container = document.getElementById(containerId);
             container.innerHTML = '';
-            
+
             if (totalPages <= 1) {
                 return;
             }
@@ -799,7 +1005,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
             prevBtn.disabled = currentPage === 1;
             prevBtn.onclick = function() { callback(currentPage - 1); };
             container.appendChild(prevBtn);
-            
+
             // 页码
             for (let i = 1; i <= totalPages; i++) {
                 if (i === 1 || i === totalPages || (i >= currentPage - 2 && i <= currentPage + 2)) {
@@ -814,7 +1020,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     container.appendChild(ellipsis);
                 }
             }
-            
+
             // 下一页
             const nextBtn = document.createElement('button');
             nextBtn.className = 'page-btn';
@@ -832,7 +1038,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
                     throw new Error('HTTP ' + response.status);
                 }
                 const data = await response.json();
-                
+
                 if (data.error) {
                     showError('messageStatsContainer', data.error);
                     return;
@@ -860,39 +1066,39 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         function createStatCard(icon, number, label, type) {
             const card = document.createElement('div');
             card.className = 'stat-card ' + type;
-            
+
             const iconDiv = document.createElement('div');
             iconDiv.className = 'icon';
             iconDiv.textContent = icon;
             card.appendChild(iconDiv);
-            
+
             const numberDiv = document.createElement('div');
             numberDiv.className = 'number';
             numberDiv.textContent = number;
             card.appendChild(numberDiv);
-            
+
             const labelDiv = document.createElement('div');
             labelDiv.className = 'label';
             labelDiv.textContent = label;
             card.appendChild(labelDiv);
-            
+
             return card;
         }
 
         async function loadRecentActivity() {
             const container = document.getElementById('recentActivity');
             container.innerHTML = '';
-            
+
             const emptyState = document.createElement('div');
             emptyState.className = 'empty-state';
-            
+
             const icon = document.createElement('div');
             icon.className = 'empty-state-icon';
             icon.textContent = '📋';
-            
+
             const text = document.createElement('div');
             text.appendChild(createTextNode('暂无最近活动'));
-            
+
             emptyState.appendChild(icon);
             emptyState.appendChild(text);
             container.appendChild(emptyState);
@@ -919,7 +1125,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         async function searchMessages() {
             const query = document.getElementById('msgSearchInput').value.trim();
             const container = document.getElementById('searchResults');
-            
+
             if (!query || query.length < 2) {
                 container.innerHTML = '';
                 const emptyState = document.createElement('div');
@@ -986,7 +1192,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 
                 data.results.forEach(msg => {
                     const row = document.createElement('tr');
-                    
+
                     const dirCell = document.createElement('td');
                     dirCell.textContent = msg.direction === 'in' ? '👤 用户' : '🤖 管理员';
                     row.appendChild(dirCell);
@@ -1019,6 +1225,32 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         document.getElementById('msgSearchInput').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') searchMessages();
         });
+
+        // ===== 美化 v2：顶栏系统状态实时监测（/health 与 /version 为公开端点） =====
+        function refreshSystemStatus() {
+            fetch('/version').then(function(r) { return r.json(); }).then(function(d) {
+                const ver = document.getElementById('verChip');
+                const v = document.getElementById('sysVersionV');
+                if (ver && d && d.version) ver.textContent = 'v' + d.version;
+                if (v && d && d.version) v.textContent = d.version;
+            }).catch(function() {});
+            fetch('/health').then(function(r) {
+                const chip = document.getElementById('sysChip');
+                const hv = document.getElementById('sysHealthV');
+                if (chip) {
+                    if (r.ok) { chip.className = 'chip chip-ok'; chip.textContent = '● 运行正常'; }
+                    else { chip.className = 'chip chip-bad'; chip.textContent = '● 异常 ' + r.status; }
+                }
+                if (hv) hv.textContent = r.ok ? '🟢 正常' : '🔴 异常（HTTP ' + r.status + '）';
+            }).catch(function() {
+                const chip = document.getElementById('sysChip');
+                const hv = document.getElementById('sysHealthV');
+                if (chip) { chip.className = 'chip chip-bad'; chip.textContent = '● 无响应'; }
+                if (hv) hv.textContent = '🔴 无响应';
+            });
+        }
+        refreshSystemStatus();
+        setInterval(refreshSystemStatus, 30000);
 
     </script>
 </body>
