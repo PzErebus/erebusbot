@@ -797,9 +797,11 @@ export class OptimizedDatabase {
     id: number; user_id: number; direction: string; content: string; created_at: number;
   }>> {
     return await this.safeExecute('searchMessages', async () => {
+      // LIKE 通配符转义：用户输入 % 或 _ 不应扩大匹配范围
+      const q = query.replace(/[\\%_]/g, ch => '\\' + ch);
       const r = await this.db.prepare(
-        'SELECT id, user_id, direction, content, created_at FROM pm_messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?'
-      ).bind(`%${query}%`, limit).all();
+        "SELECT id, user_id, direction, content, created_at FROM pm_messages WHERE content LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?"
+      ).bind(`%${q}%`, limit).all();
       return (r.results as Array<{
         id: number; user_id: number; direction: string; content: string; created_at: number;
       }>) || [];
@@ -875,6 +877,13 @@ export class OptimizedDatabase {
     }) ?? null;
   }
 
+  async updateQuickReply(id: number, title: string, content: string): Promise<void> {
+    await this.safeExecute('updateQuickReply', async () => {
+      await this.db.prepare('UPDATE pm_quick_replies SET title = ?, content = ? WHERE id = ?').bind(title, content, id).run();
+    });
+    this.cache.delete('quick_replies');
+  }
+
   // ============ Scheduled Messages ============
   async addScheduledMessage(userId: number | null, content: string, messageType: string, fileId: string | null, scheduledAt: number): Promise<number> {
     const result = await this.safeExecute('addScheduledMessage', async () => {
@@ -934,14 +943,23 @@ export class OptimizedDatabase {
     });
   }
 
-  async getAuditLogs(limit: number = 50): Promise<Array<{
+  async getAuditLogs(limit: number = 50, offset: number = 0): Promise<Array<{
     id: number; admin_id: number; action: string; target_type: string | null; target_id: string | null; details: string | null; created_at: number;
   }>> {
     return await this.safeExecute('getAuditLogs', async () => {
-      const r = await this.db.prepare('SELECT * FROM pm_audit_log ORDER BY created_at DESC LIMIT ?').bind(limit).all();
+      const r = await this.db.prepare('SELECT * FROM pm_audit_log ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?').bind(limit, offset).all();
       return (r.results as Array<{
         id: number; admin_id: number; action: string; target_type: string | null; target_id: string | null; details: string | null; created_at: number;
       }>) || [];
+    });
+  }
+
+  /** 清理超过 days 天的审计日志，返回删除行数。每天由定时器节流调用一次。 */
+  async cleanupAuditLogs(days: number = 30): Promise<number> {
+    return await this.safeExecute('cleanupAuditLogs', async () => {
+      const cutoff = Math.floor(Date.now() / 1000) - days * 86400;
+      const r = await this.db.prepare('DELETE FROM pm_audit_log WHERE created_at < ?').bind(cutoff).run();
+      return r.meta?.changes || 0;
     });
   }
 

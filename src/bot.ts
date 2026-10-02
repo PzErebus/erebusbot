@@ -93,7 +93,7 @@ export function resetAntiSpamState(): void {
 }
 
 /** 版本号单一来源：index.ts 的 /version 端点与 help 面板共用 */
-export const BOT_VERSION = '202610021322';
+export const BOT_VERSION = '202610021345';
 
 function fire<T>(p: Promise<T>): void { p.catch(() => {}); }
 
@@ -440,6 +440,27 @@ export function createBot(env: Env) {
 
   async function answerCb(queryId: string, text?: string, showAlert = false): Promise<void> {
     await api('answerCallbackQuery', { callback_query_id: queryId, text, show_alert: showAlert });
+  }
+
+  /**
+   * 发送文件（multipart/form-data，api() 走的是 JSON，这里单独实现）。
+   * 用于数据备份导出——JSON 贴聊天里会被 Telegram 长度限制截断，发文件才完整。
+   */
+  async function sendDocument(chatId: number, content: string, filename: string, caption?: string): Promise<boolean> {
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(chatId));
+      if (caption) form.append('caption', caption);
+      form.append('parse_mode', 'HTML');
+      form.append('document', new Blob([content], { type: 'application/json' }), filename);
+      const r = await fetch(`https://api.telegram.org/bot${TOKEN}/sendDocument`, { method: 'POST', body: form });
+      const d = await r.json() as { ok: boolean; description?: string };
+      if (!d.ok) log.error('sendDocument failed', { filename, description: d.description });
+      return d.ok;
+    } catch (e) {
+      log.error('sendDocument exception', { filename, error: e });
+      return false;
+    }
   }
 
   // ============ 回调 handler 通用包装 ============
@@ -958,6 +979,64 @@ export function createBot(env: Env) {
       fire(db.clearUserSession(userId));
     },
 
+    async search_messages(text, chatId, userId) {
+      const kw = text.trim().substring(0, 50);
+      if (kw.length < 2) {
+        await sendMsg(chatId, '❌ 关键词至少 2 个字符，请重新输入：');
+        return; // 不清 session，允许直接重输
+      }
+      const results = await db.searchMessages(kw, 20).catch(e => {
+        log.error('searchMessages failed', { error: e });
+        return [];
+      });
+      let out = head('🔍 搜索结果', `「${escapeHtml(kw)}」`) +
+        `\n命中 <b>${results.length}</b> 条（最多显示 20 条）\n`;
+      if (results.length === 0) {
+        out += tip('没有找到匹配的消息，换个关键词试试');
+      } else {
+        out += sec('最近命中');
+        for (const m of results.slice(0, 10)) {
+          const dir = m.direction === 'in' ? '👤' : '🤖';
+          out += `\n${dir} ${fmtTime(m.created_at)} · 用户 <code>${m.user_id}</code>\n${escapeHtml(trunc(m.content, 36))}`;
+        }
+      }
+      // 去重出命中消息的用户，两列直达其详情/历史
+      const kb: KbRow[] = [];
+      const seen = new Set<number>();
+      let row: KbRow = [];
+      for (const m of results) {
+        if (seen.has(m.user_id)) continue;
+        seen.add(m.user_id);
+        row.push({ text: `👤 ${m.user_id}`, callback_data: `pm_user_${m.user_id}` });
+        if (row.length === 2) { kb.push(row); row = []; }
+        if (kb.length >= 5) break;
+      }
+      if (row.length > 0) kb.push(row);
+      kb.push([{ text: '🔍 再搜一次', callback_data: 'search_messages' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      await sendMsg(chatId, out, { reply_markup: mk(...kb) });
+      fire(db.clearUserSession(userId));
+    },
+
+    async edit_quick(text, chatId, userId) {
+      try {
+        const session = await db.getUserSession(userId);
+        if (!session) return;
+        const data = JSON.parse(session.data) as { editId?: number };
+        const parts = text.split('|');
+        if (parts.length < 2 || !parts[0].trim() || !parts[1].trim()) {
+          await sendMsg(chatId, '❌ 格式错误，请使用: 标题|内容');
+          return; // 不清 session，允许重试
+        }
+        if (!data.editId) { await sendMsg(chatId, '❌ 会话数据丢失，请重新操作'); }
+        else {
+          await db.updateQuickReply(data.editId, parts[0].trim(), parts[1].trim());
+          await sendMsg(chatId, `✅ 快捷回复已更新：${escapeHtml(parts[0].trim())}`);
+          await showQuickReplies(chatId);
+        }
+      } catch { await sendMsg(chatId, '❌ 更新失败'); }
+      fire(db.clearUserSession(userId));
+    },
+
     async add_scheduled_msg(text, chatId, userId) {
       try {
         const session = await db.getUserSession(userId);
@@ -1204,7 +1283,7 @@ export function createBot(env: Env) {
       await editOrSend(chatId, text, {
         reply_markup: mk(
           [{ text: '👥 用户列表', callback_data: 'user_list' }],
-          [{ text: `🚫 封禁列表 (${blocked.length})`, callback_data: 'ban_list' }],
+          [{ text: '🔍 搜索消息', callback_data: 'search_messages' }, { text: `🚫 封禁列表 (${blocked.length})`, callback_data: 'ban_list' }],
           [{ text: '📢 群发消息', callback_data: 'broadcast' }],
           [{ text: '🏠 主页', callback_data: 'admin_back' }]
         )
@@ -1804,7 +1883,8 @@ export function createBot(env: Env) {
       const keyboard: KbRow[] = [];
       for (const r of pageReplies) {
         keyboard.push([
-          { text: `⚡ ${trunc(r.title, 12)}`, callback_data: `use_quick_${r.id}` },
+          { text: `⚡ ${trunc(r.title, 10)}`, callback_data: `use_quick_${r.id}` },
+          { text: '✏️', callback_data: `edit_quick_${r.id}` },
           { text: '🗑️', callback_data: `delete_quick_${r.id}` }
         ]);
       }
@@ -1850,21 +1930,27 @@ export function createBot(env: Env) {
     }
   }
 
-  async function showAuditLog(chatId: number, messageId?: number): Promise<void> {
+  async function showAuditLog(chatId: number, messageId?: number, page: number = 0): Promise<void> {
     try {
-      const logs = await db.getAuditLogs(20);
-      let text = head('📝 审计日志', `最近 ${logs.length} 条`);
-      if (logs.length === 0) {
+      // 多取 1 条判断有没有下一页
+      const PAGE_SIZE = 10;
+      const logs = await db.getAuditLogs(PAGE_SIZE + 1, page * PAGE_SIZE);
+      const hasMore = logs.length > PAGE_SIZE;
+      const rows = logs.slice(0, PAGE_SIZE);
+      let text = head('📝 审计日志', `第 ${page + 1} 页 · 保留 30 天`);
+      if (rows.length === 0) {
         text += `\n\n<i>暂无操作记录</i>`;
       } else {
-        for (const entry of logs.slice(0, 15)) {
+        for (const entry of rows) {
           text += `\n🕐 ${fmtTime(entry.created_at)} · <b>${escapeHtml(entry.action)}</b>${entry.target_id ? ` → ${escapeHtml(entry.target_id)}` : ''}`;
         }
       }
 
-      await editOrSend(chatId, text, {
-        reply_markup: mk([{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }])
-      }, messageId);
+      const keyboard: KbRow[] = [];
+      const nav = navRow('audit_page_', page, hasMore);
+      if (nav) keyboard.push(nav);
+      keyboard.push([{ text: '🔙 系统', callback_data: 'hub_sys' }, { text: '🏠 主页', callback_data: 'admin_back' }]);
+      await editOrSend(chatId, text, { reply_markup: mk(...keyboard) }, messageId);
     } catch (e) {
       await editOrSend(chatId, '❌ 加载失败', undefined, messageId);
     }
@@ -1981,12 +2067,25 @@ export function createBot(env: Env) {
       const data = await guard('export_json')(db.exportAllData());
       if (data === null) { await showFail(ctx.chatId, ctx.msgId, '导出'); return; }
       const json = JSON.stringify(data, null, 2);
-      const truncated = json.length > 3500 ? json.substring(0, 3500) + '\n\n... (数据过大，已截断)' : json;
-      await editOrSend(ctx.chatId, head('📥 数据导出') + `\n\n<code>${escapeHtml(truncated)}</code>`, {
-        reply_markup: mk([{ text: '🔙 数据备份', callback_data: 'backup' }, { text: '🏠 主页', callback_data: 'admin_back' }])
-      }, ctx.msgId);
+      const stamp = fmtDate(Date.now()).replace(/[^0-9]/g, '');
+      const filename = `erebusbot-backup-${stamp}.json`;
+      // 完整数据走文件发送；失败才降级为聊天内截断文本
+      const sent = await sendDocument(ctx.chatId, json, filename,
+        `💾 <b>数据备份</b>\n完整导出 ${json.length} 字符，生成于 ${fmtDate(Date.now())}`);
+      if (sent) {
+        await editOrSend(ctx.chatId, head('📥 数据导出') +
+          `\n✅ 完整备份已作为文件发送（${json.length} 字符）` +
+          tip('文件可直接保存或转发，不再截断'), {
+          reply_markup: mk([{ text: '🔙 数据备份', callback_data: 'backup' }, { text: '🏠 主页', callback_data: 'admin_back' }])
+        }, ctx.msgId);
+      } else {
+        const truncated = json.length > 3500 ? json.substring(0, 3500) + '\n\n... (数据过大，已截断，文件发送失败)' : json;
+        await editOrSend(ctx.chatId, head('📥 数据导出') + `\n\n<code>${escapeHtml(truncated)}</code>`, {
+          reply_markup: mk([{ text: '🔙 数据备份', callback_data: 'backup' }, { text: '🏠 主页', callback_data: 'admin_back' }])
+        }, ctx.msgId);
+      }
       // 审计日志与用户看到的导出结果无关，异步落库不阻塞回包
-      fire(db.addAuditLog(ctx.userId, 'export_data', 'system', 'all', 'JSON export'));
+      fire(db.addAuditLog(ctx.userId, 'export_data', 'system', 'all', `JSON export ${json.length} chars`));
     }],
     ['mark_all_read', async (ctx) => {
       const ok = await guard('mark_all_read')(db.markAllMessagesAsRead());
@@ -1994,10 +2093,23 @@ export function createBot(env: Env) {
       await showPmStats(ctx.chatId, ctx.msgId);
     }],
     ['unread_messages', async (ctx) => { await showUnreadMessages(ctx.chatId, ctx.msgId); }],
+    ['search_messages', async (ctx) => {
+      await promptInput(ctx, 'search_messages', '🔍 搜索消息',
+        '请输入关键词（至少 2 个字符），将搜索全部历史消息', 'user_list');
+    }],
     ['noop', async () => { /* 占位按钮：仅消除转圈动画（handleCallback 已统一 answer） */ }],
   ]);
 
   const CALLBACK_PREFIX: Array<{ prefix: string; handler: CbHandler }> = [
+    { prefix: 'edit_quick_', handler: async (ctx) => {
+      const id = parseInt(ctx.data.slice('edit_quick_'.length), 10);
+      if (!id) { await editOrSend(ctx.chatId, '❌ 参数错误', undefined, ctx.msgId); return; }
+      const r = await db.getQuickReply(id).catch(() => null);
+      const cur = r ? `\n当前标题：<b>${escapeHtml(r.title)}</b>\n当前内容：${escapeHtml(trunc(r.content, 60))}\n` : '';
+      await promptInput(ctx, 'edit_quick', '✏️ 编辑快捷回复',
+        `${cur}\n请输入新内容，格式: 标题|内容`, 'quick_replies', { editId: id });
+    } },
+    { prefix: 'audit_page_', handler: async (ctx) => { await showAuditLog(ctx.chatId, ctx.msgId, cbNum(ctx.data, 2)); } },
     { prefix: 'cancel_to_', handler: async (ctx) => {
       // 取消输入会话：先清 session（防残留吞文本），再跳回 cancelTo 指向的面板
       const target = ctx.data.slice('cancel_to_'.length);
@@ -2416,7 +2528,18 @@ export function createBot(env: Env) {
    * user_id 为空表示广播给全部用户（每批并发 10）。
    * 投递失败也标记已发送（记日志+审计），防止永久重试刷爆；失败数体现在审计里。
    */
+  // 审计日志自动清理：每天最多跑一次（模块级节流，跨 webhook 请求持久）
+  let auditCleanupDay = '';
+
   async function processScheduledMessages(): Promise<{ scanned: number; sent: number; failed: number }> {
+    // 顺手做每日审计清理（30 天前），失败不影响主流程
+    const today = new Date().toDateString();
+    if (auditCleanupDay !== today) {
+      auditCleanupDay = today;
+      fire(db.cleanupAuditLogs(30).then(n => { if (n > 0) log.info('Audit logs cleaned', { deleted: n }); }).catch(e => {
+        log.error('Audit cleanup failed', { error: e });
+      }));
+    }
     const due = (await db.getPendingScheduledMessages().catch(e => {
       log.error('Error fetching scheduled messages', { error: e });
       return null;
